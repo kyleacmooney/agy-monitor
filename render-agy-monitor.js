@@ -459,7 +459,7 @@ function renderAgyMonitor(tool) {
       title: "$" + v.toFixed(2),
       style: { height: Math.max(8, Math.round((v / mx) * 100)) + "%" },
     }))));
-    foot.appendChild(el("div", { class: "agy-hint", text: "⌘K PALETTE · J/K MOVE · N NEW CHAT · [ ] PANELS" }));
+    foot.appendChild(el("div", { class: "agy-hint", text: "⌘K PALETTE · J/K MOVE · N NEW CHAT · [ ] PANELS · ⌘[ ⌘] BACK/FWD" }));
     aside.appendChild(foot);
 
     sideHost.appendChild(aside);
@@ -540,8 +540,8 @@ function renderAgyMonitor(tool) {
     // window (no browser chrome). Shown once you've navigated; greyed at the ends.
     if (S.maxPos > 0) {
       const canBack = S.curPos > 0, canFwd = S.curPos < S.maxPos;
-      left.appendChild(el("span", { class: "agy-back" + (canBack ? "" : " disabled"), title: "back (esc)", text: "←", onclick: canBack ? () => history.back() : undefined }));
-      left.appendChild(el("span", { class: "agy-back" + (canFwd ? "" : " disabled"), title: "forward", text: "→", onclick: canFwd ? () => history.forward() : undefined }));
+      left.appendChild(el("span", { class: "agy-back" + (canBack ? "" : " disabled"), title: "back (⌘[ or esc)", text: "←", onclick: canBack ? () => history.back() : undefined }));
+      left.appendChild(el("span", { class: "agy-back" + (canFwd ? "" : " disabled"), title: "forward (⌘])", text: "→", onclick: canFwd ? () => history.forward() : undefined }));
     }
 
     let crumb = "AGY MONITOR", title = "Overview", chip = null;
@@ -3361,6 +3361,10 @@ function renderAgyMonitor(tool) {
     const tag = (e.target && e.target.tagName) || "";
     const typing = tag === "INPUT" || tag === "TEXTAREA";
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); if (S.palOpen) closePalette(); else openPalette(false); return; }
+    // ⌘[ / ⌘] — back/forward through the nav stack (preventDefault so it never
+    // double-fires with a PWA/browser window's own ⌘[ handling). Works while typing.
+    if ((e.metaKey || e.ctrlKey) && e.key === "[") { e.preventDefault(); history.back(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.key === "]") { e.preventDefault(); history.forward(); return; }
     if (e.key === "Escape") {
       if (S.palOpen) { closePalette(); return; }
       if (lightboxEl) { closeLightbox(); return; }

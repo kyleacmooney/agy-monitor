@@ -427,6 +427,13 @@ const SHOTS = path.join(__dirname, "shots");
   await page.locator(".hleft .agy-back").nth(1).click(); // forward
   await page.waitForSelector(".agy-comp-bar", { timeout: 8000 });
   fx.assert((await navCls(1)).includes("disabled"), "forward disables again after going forward", failures);
+  // ⌘[ / ⌘] drive the same back/forward from the keyboard
+  await page.keyboard.press("Meta+BracketLeft");  // ⌘[ back
+  await page.waitForTimeout(200);
+  fx.assert(!(await navCls(1)).includes("disabled"), "⌘[ navigates back (forward re-enables)", failures);
+  await page.keyboard.press("Meta+BracketRight"); // ⌘] forward
+  await page.waitForSelector(".agy-comp-bar", { timeout: 8000 });
+  fx.assert((await navCls(1)).includes("disabled"), "⌘] navigates forward (back to the newest entry)", failures);
 
   // narrow composer column drops the keyboard hint so btw/files/Send never overlap it
   fx.assert(await page.locator(".agy-comp-bar .agy-hint").isVisible(), "keyboard hint visible at a wide composer", failures);
