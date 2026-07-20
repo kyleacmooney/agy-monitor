@@ -68,7 +68,14 @@ PLIST_EOF
 
 echo "==> wrote $PLIST  (node=$NODE${CLAUDE:+, claude=$CLAUDE})"
 launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$UID" "$PLIST"
+# bootout is asynchronous — bootstrapping the same label too soon fails with
+# "Input/output error" (EIO) while the old instance tears down, so retry briefly.
+booted=0
+for _ in 1 2 3 4 5; do
+  if launchctl bootstrap "gui/$UID" "$PLIST" 2>/dev/null; then booted=1; break; fi
+  sleep 1
+done
+[ "$booted" = "1" ] || launchctl bootstrap "gui/$UID" "$PLIST"   # final attempt, errors shown
 launchctl kickstart -k "gui/$UID/$LABEL" 2>/dev/null || true
 sleep 1
 
