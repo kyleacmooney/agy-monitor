@@ -408,6 +408,32 @@ const SHOTS = path.join(__dirname, "shots");
   });
   fx.assert(hintFits, "sidebar footer hint stays inside the sidebar", failures);
 
+  // in-app back/forward nav (a PWA window has no browser chrome): buttons appear
+  // once you've navigated and grey out at the ends of this session's stack.
+  await page.goto(base); // fresh history → overview sits at the start of the stack
+  await page.waitForSelector(".agy-side", { timeout: 8000 });
+  fx.assert(await page.locator(".hleft .agy-back").count() === 0, "no nav buttons at the fresh overview", failures);
+  await page.click(".agy-nav-item:has-text('All chats')");
+  await page.waitForSelector(".agy-chatrow", { timeout: 8000 });
+  await page.locator(".agy-chatrow").first().click();
+  await page.waitForSelector(".agy-comp-bar", { timeout: 8000 });
+  const navCls = async (i) => (await page.locator(".hleft .agy-back").nth(i).getAttribute("class")) || "";
+  fx.assert(await page.locator(".hleft .agy-back").count() === 2, "back + forward buttons appear after navigating into a chat", failures);
+  fx.assert(!(await navCls(0)).includes("disabled"), "back is enabled inside a chat", failures);
+  fx.assert((await navCls(1)).includes("disabled"), "forward is disabled at the newest entry", failures);
+  await page.locator(".hleft .agy-back").nth(0).click(); // back
+  await page.waitForTimeout(200);
+  fx.assert(!(await navCls(1)).includes("disabled"), "forward enables after going back", failures);
+  await page.locator(".hleft .agy-back").nth(1).click(); // forward
+  await page.waitForSelector(".agy-comp-bar", { timeout: 8000 });
+  fx.assert((await navCls(1)).includes("disabled"), "forward disables again after going forward", failures);
+
+  // narrow composer column drops the keyboard hint so btw/files/Send never overlap it
+  fx.assert(await page.locator(".agy-comp-bar .agy-hint").isVisible(), "keyboard hint visible at a wide composer", failures);
+  await page.addStyleTag({ content: ".agy-comp-strip{max-width:360px !important;}" });
+  await page.waitForTimeout(150);
+  fx.assert(!(await page.locator(".agy-comp-bar .agy-hint").isVisible()), "keyboard hint hidden when the composer is narrow", failures);
+
   // new-chat draft: an unsent workspace + message survives navigating away AND a reload
   await page.goto(base + "/?new=");
   await page.waitForSelector(".agy-nc-ta", { timeout: 8000 });

@@ -43,6 +43,24 @@ T("STALE PreToolUse WITH skip-perms → stays busy (tool running long), NOT idle
   assert.strictEqual(d.state, "busy");
   assert.match(d.stateDetail, /still running/);
 });
+// policy-aware fast path: a run_command agy prompts on (forcesApproval) is "awaiting
+// approval" the instant PreToolUse fires — no need to wait out BUSY_STALE_MS.
+const runCmdLive = (ageMs, forces) => ({ state: "busy", detail: "running run_command", tool: "run_command", event: "PreToolUse", ts: (NOW - ageMs) / 1000, forcesApproval: forces });
+
+T("FRESH run_command that forces approval → waiting immediately (no stale wait)", () => {
+  const d = displayLiveState(runCmdLive(500, true), false, NOW);
+  assert.strictEqual(d.state, "waiting");
+  assert.match(d.stateDetail, /awaiting approval: run_command/);
+  assert.strictEqual(d.tool, "run_command");
+});
+T("FRESH run_command forcing approval WITH skip-perms → stays busy (no prompt)", () => {
+  const d = displayLiveState(runCmdLive(500, true), true, NOW);
+  assert.strictEqual(d.state, "busy");
+});
+T("FRESH run_command that does NOT force approval → stays busy (running)", () => {
+  const d = displayLiveState(runCmdLive(500, false), false, NOW);
+  assert.strictEqual(d.state, "busy");
+});
 T("STALE PostToolUse (missed Stop) → idle / your turn", () => {
   const d = displayLiveState(postToolLive(BUSY_STALE_MS + 60000), false, NOW);
   assert.strictEqual(d.state, "idle");

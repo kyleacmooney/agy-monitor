@@ -179,6 +179,7 @@ function renderAgyMonitor(tool) {
   const S = {
     view: { kind: "overview" },
     navDepth: 0,
+    curPos: 0, maxPos: 0,  // absolute position in this session's nav stack → back/forward enablement
     focusIdx: -1,          // j/k focus over the flattened session list
     palOpen: false, palQuery: "", palIdx: 0, palPick: false,
     rightTab: "diff",      // diff | turn  (mcp/review arrive with their features)
@@ -535,7 +536,13 @@ function renderAgyMonitor(tool) {
     const v = S.view;
 
     const left = el("div", { class: "hleft" });
-    if (S.navDepth > 0) left.appendChild(el("span", { class: "agy-back", title: "back (esc)", text: "←", onclick: () => history.back() }));
+    // back/forward through this session's nav stack — the only way to move in a PWA
+    // window (no browser chrome). Shown once you've navigated; greyed at the ends.
+    if (S.maxPos > 0) {
+      const canBack = S.curPos > 0, canFwd = S.curPos < S.maxPos;
+      left.appendChild(el("span", { class: "agy-back" + (canBack ? "" : " disabled"), title: "back (esc)", text: "←", onclick: canBack ? () => history.back() : undefined }));
+      left.appendChild(el("span", { class: "agy-back" + (canFwd ? "" : " disabled"), title: "forward", text: "→", onclick: canFwd ? () => history.forward() : undefined }));
+    }
 
     let crumb = "AGY MONITOR", title = "Overview", chip = null;
     if (v.kind === "convo") {
@@ -1019,7 +1026,7 @@ function renderAgyMonitor(tool) {
     // first-run experience: a broken core environment lands you ON the fixes,
     // not on an empty overview (only from the default view — never yank a deep link)
     if (firstBoot && D.setup && !D.setup.summary.coreReady && S.view.kind === "overview") {
-      history.replaceState({ kind: "setup", navDepth: 0 }, "", urlFor({ kind: "setup" }));
+      history.replaceState({ kind: "setup", navDepth: 0, pos: S.curPos }, "", urlFor({ kind: "setup" }));
       render({ kind: "setup" });
     }
     return D.setup;
@@ -2066,7 +2073,7 @@ function renderAgyMonitor(tool) {
       S.panes = S.panes.concat([cid]);
       S.paneFocus = S.panes.length - 1;
       P.leftOpen = false;
-      history.replaceState(Object.assign({ navDepth: S.navDepth }, { kind: "split", panes: S.panes }), "", urlFor({ kind: "split" }));
+      history.replaceState(Object.assign({ navDepth: S.navDepth, pos: S.curPos }, { kind: "split", panes: S.panes }), "", urlFor({ kind: "split" }));
       render({ kind: "split", panes: S.panes });
       return;
     }
@@ -2084,13 +2091,13 @@ function renderAgyMonitor(tool) {
     if (panes.length <= 1) {
       const last = panes[0] || cid;
       S.panes = [];
-      history.replaceState(Object.assign({ navDepth: S.navDepth }, { kind: "convo", ctx: ctxForCid(last) }), "", urlFor({ kind: "convo", ctx: { conversationId: last } }));
+      history.replaceState(Object.assign({ navDepth: S.navDepth, pos: S.curPos }, { kind: "convo", ctx: ctxForCid(last) }), "", urlFor({ kind: "convo", ctx: { conversationId: last } }));
       render({ kind: "convo", ctx: ctxForCid(last) });
       return;
     }
     S.panes = panes;
     S.paneFocus = Math.min(S.paneFocus, panes.length - 1);
-    history.replaceState(Object.assign({ navDepth: S.navDepth }, { kind: "split", panes: S.panes }), "", urlFor({ kind: "split" }));
+    history.replaceState(Object.assign({ navDepth: S.navDepth, pos: S.curPos }, { kind: "split", panes: S.panes }), "", urlFor({ kind: "split" }));
     render({ kind: "split", panes: S.panes });
   }
 
@@ -3106,7 +3113,7 @@ function renderAgyMonitor(tool) {
         if (!stillPending()) return;
         render({ kind: "newchat", ctx: { workspace, message } }); // re-mount the form, message + options preserved
         const st = { kind: "newchat", ctx: { workspace } };
-        history.replaceState(Object.assign({ navDepth: S.navDepth }, st), "", urlFor(st));
+        history.replaceState(Object.assign({ navDepth: S.navDepth, pos: S.curPos }, st), "", urlFor(st));
       };
       try {
         const res = await runTool(tool.id, {
@@ -3121,7 +3128,7 @@ function renderAgyMonitor(tool) {
           clearDraft(); // it started — the draft is no longer "unsent"
           const ctx = { conversationId: res.conversationId, workspace: res.workspace, project: (res.workspace || workspace).split("/").pop(), shortWorkspace: res.workspace };
           if (stillPending()) {
-            history.replaceState(Object.assign({ navDepth: S.navDepth }, { kind: "convo", ctx }), "", urlFor({ kind: "convo", ctx }));
+            history.replaceState(Object.assign({ navDepth: S.navDepth, pos: S.curPos }, { kind: "convo", ctx }), "", urlFor({ kind: "convo", ctx }));
             render({ kind: "convo", ctx }); // upgrade the placeholder to the live conversation in place
           }
           return;
@@ -3454,25 +3461,31 @@ function renderAgyMonitor(tool) {
     }
   }
 
+  // A push (go/navTop) starts a fresh forward branch: the current position advances
+  // and becomes the furthest-forward entry (any forward history the browser had is gone).
   function go(view) {
     S.navDepth++;
-    history.pushState(Object.assign({ navDepth: S.navDepth }, view), "", urlFor(view));
+    S.curPos = S.maxPos = S.curPos + 1;
+    history.pushState(Object.assign({ navDepth: S.navDepth, pos: S.curPos }, view), "", urlFor(view));
     render(view);
   }
   function navTop(view) {
     S.navDepth = 0;
-    history.pushState(Object.assign({ navDepth: 0 }, view), "", urlFor(view));
+    S.curPos = S.maxPos = S.curPos + 1;
+    history.pushState(Object.assign({ navDepth: 0, pos: S.curPos }, view), "", urlFor(view));
     render(view);
   }
   window.addEventListener("popstate", (ev) => {
     const st = ev.state && ev.state.kind ? ev.state : (viewFromUrl() || { kind: "overview" });
     S.navDepth = (ev.state && typeof ev.state.navDepth === "number") ? ev.state.navDepth : 0;
+    S.curPos = (ev.state && typeof ev.state.pos === "number") ? ev.state.pos : 0; // maxPos stays: forward is still reachable
     render(st);
   });
 
   // ---------- boot ----------
   const initial = (history.state && history.state.kind) ? history.state : (viewFromUrl() || { kind: "overview" });
   S.navDepth = (history.state && typeof history.state.navDepth === "number") ? history.state.navDepth : (initial.kind === "overview" ? 0 : 1);
+  S.curPos = S.maxPos = (history.state && typeof history.state.pos === "number") ? history.state.pos : 0;
   render(initial);
   refreshCore();
   runTool(tool.id, { action: "list-commands" }).then((r) => { if (r && r.ok) D.commands = r.commands || []; }).catch(() => {});

@@ -26,6 +26,7 @@ const { execFile, execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const agyPolicy = require("./agy-policy"); // classify a run_command → does agy prompt on it?
 
 // AGY_MONITOR_ROOT / AGY_CLI_HOME let the server tests point everything at
 // fixture dirs (same convention agy-gate.js already uses).
@@ -1449,6 +1450,12 @@ function displayLiveState(live, skipPerms, now) {
   if (!live) return { state: "running", stateDetail: null, tool: null };
   let state = live.state, stateDetail = live.detail, tool = live.tool || null;
   const nowMs = now == null ? Date.now() : now;
+  // Policy-aware fast path: a dangling PreToolUse for a run_command agy prompts on
+  // means it's blocked on the terminal's approval prompt RIGHT NOW — no need to wait
+  // out BUSY_STALE_MS to say "awaiting approval". Only with a real prompt (no skip-perms).
+  if (state === "busy" && !skipPerms && live.event === "PreToolUse" && live.forcesApproval) {
+    return { state: "waiting", stateDetail: `awaiting approval: ${live.tool || "run_command"}`, tool: live.tool || null };
+  }
   if (state === "busy" && nowMs - live.ts * 1000 > BUSY_STALE_MS) {
     if (live.event === "PreToolUse" && live.tool) {
       if (skipPerms) stateDetail = `still running ${live.tool}`;
@@ -1486,6 +1493,14 @@ function readStatuses() {
       ...deriveState(rec.event, rec.payload),
       event: rec.event,
     };
+    // A run_command that agy will prompt on (not trivially safe) parks the session
+    // at its native approval prompt the instant PreToolUse fires — flag it so the
+    // display can say "awaiting approval" without waiting out the staleness timer.
+    if (rec.event === "PreToolUse") {
+      const tc = rec.payload && rec.payload.toolCall;
+      const cmd = tc && tc.name === "run_command" && tc.args && tc.args.CommandLine;
+      if (cmd) { try { entry.forcesApproval = agyPolicy.screen(cmd).disposition !== "eligible"; } catch {} }
+    }
     if (rec.conversationId && rec.conversationId !== "unknown") byConv[rec.conversationId] = entry;
     if (ws && (!byWorkspace[ws] || (entry.ts || 0) >= (byWorkspace[ws].ts || 0))) byWorkspace[ws] = entry;
   }
