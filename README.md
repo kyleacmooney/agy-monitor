@@ -75,6 +75,20 @@ daemon/uninstall.sh        # remove
 
 Override the port or add a token by exporting them first (`PORT=…`, `AGY_MONITOR_TOKEN=…`, `AGY_MONITOR_SELF_UPDATE=1`). The agent's label is `com.<you>.agy-monitor` (override with `AGY_MONITOR_LABEL`) and logs go to `~/Library/Logs/agy-monitor.log`.
 
+## Updating
+
+On a machine that runs the daemon, pull the latest and restart in one step:
+
+```sh
+./update.sh                # git pull → re-point the plist → restart → health check
+```
+
+There are no runtime dependencies, so there's nothing to `npm install` for a normal
+update. `update.sh` skips the pull automatically if the folder isn't a git checkout
+(e.g. you refreshed it from a downloaded ZIP), so it still restarts onto the new code —
+just refresh the folder first. State and config live in `~/.agy-monitor/`, outside the
+repo, so replacing the folder never loses anything.
+
 ## Desktop app
 
 ```sh
