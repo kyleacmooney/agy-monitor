@@ -152,4 +152,7 @@ function main() {
   console.log(`✓ wrote ${SPECS.length} PNGs to ${outDir}`);
 }
 
-main();
+// Shared with make-pwa-icons.js so the browser/dock icon matches app.icns exactly.
+module.exports = { encodePng, renderIcon };
+
+if (require.main === module) main();

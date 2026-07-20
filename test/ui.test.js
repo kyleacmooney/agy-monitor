@@ -408,6 +408,51 @@ const SHOTS = path.join(__dirname, "shots");
   });
   fx.assert(hintFits, "sidebar footer hint stays inside the sidebar", failures);
 
+  // new-chat draft: an unsent workspace + message survives navigating away AND a reload
+  await page.goto(base + "/?new=");
+  await page.waitForSelector(".agy-nc-ta", { timeout: 8000 });
+  await page.fill(".agy-ws-input", ws);
+  await page.fill(".agy-nc-ta", "draft: refactor the parser");
+  await page.goto(base); // leave without submitting
+  await page.waitForSelector(".agy-side, .agy-side-rail", { timeout: 8000 });
+  await page.goto(base + "/?new=");
+  await page.waitForSelector(".agy-nc-ta", { timeout: 8000 });
+  fx.assert((await page.inputValue(".agy-nc-ta")) === "draft: refactor the parser", "unsent new-chat message survives navigating away", failures);
+  fx.assert((await page.inputValue(".agy-ws-input")) === ws, "unsent new-chat workspace survives navigating away", failures);
+  await page.reload();
+  await page.waitForSelector(".agy-nc-ta", { timeout: 8000 });
+  fx.assert((await page.inputValue(".agy-nc-ta")) === "draft: refactor the parser", "unsent new-chat draft survives a reload", failures);
+  await page.evaluate(() => { try { localStorage.removeItem("agy-newchat-draft"); } catch {} });
+
+  // approval card clears INSTANTLY on Approve — optimistically, before the answer
+  // request even resolves, not on the next server poll. Hold the answer response
+  // open so only the optimistic path can remove the card.
+  await page.goto(base + "/?convo=" + fx.CID);
+  await page.waitForSelector(".agy-msg-user", { timeout: 8000 });
+  const ap3 = path.join(roots.monRoot, "approvals", fx.CID + ".json");
+  fs.writeFileSync(ap3, JSON.stringify({ id: fx.CID + "-a3", conversationId: fx.CID, command: "rm build.tmp", cwd: ws, reason: "cleanup", ts: Math.floor(Date.now() / 1000) }));
+  await page.waitForSelector(".agy-convo-approval .agy-approval", { timeout: 10000 });
+  let releaseAnswer, answerDone;
+  const answerHeld = new Promise((r) => { releaseAnswer = r; });
+  const answerFinished = new Promise((r) => { answerDone = r; });
+  await page.route("**/api/run", async (route) => {
+    const pd = route.request().postDataJSON();
+    if (pd && pd.action === "answer-approval") {
+      await answerHeld;
+      try { await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) }); } catch {}
+      answerDone();
+      return;
+    }
+    return route.continue();
+  });
+  await page.click(".agy-convo-approval .agy-btn.sm"); // Approve
+  await page.waitForSelector(".agy-convo-approval .agy-approval", { state: "detached", timeout: 1500 });
+  fx.assert(true, "Approve clears the convo approval card instantly, before the server responds", failures);
+  fs.unlinkSync(ap3);        // model the gate consuming the request so the poll can't re-add it
+  releaseAnswer();           // let the held answer request finish
+  await answerFinished;      // and fully resolve before we detach the route (avoids a fulfill/unroute race)
+  await page.unroute("**/api/run");
+
   // narrow viewport: panels reconcile, no horizontal overflow
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(base);

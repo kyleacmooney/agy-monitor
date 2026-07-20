@@ -1228,6 +1228,7 @@ function renderAgyMonitor(tool) {
     D.approvals = D.approvals.filter((x) => x.id !== a.id); // instant
     renderSide();
     if (S.overviewRefresh && S.view.kind === "overview") S.overviewRefresh();
+    if (S.approvalRefresh) { try { S.approvalRefresh(); } catch {} } // clear the card in the open convo/split view
     try { await runTool(tool.id, { action: "answer-approval", conversationId: a.conversationId, approvalId: a.id, decision }); } catch {}
     tick();
   }
@@ -2098,6 +2099,33 @@ function renderAgyMonitor(tool) {
     S.view.ctx = full;
     const openFile = (p, label) => go({ kind: "file", path: p, label });
     clear(viewEl); clear(compHost);
+
+    // Optimistic "starting agy…" placeholder: New chat navigates here the instant
+    // Start is clicked, before the conversation id exists. start() resolves the id
+    // in the background and re-renders this view with the real cid (or bounces back
+    // to the form on failure). No polling here — the upgrade is push-driven.
+    if (full.pendingStart && !full.conversationId) {
+      const feed = el("div", { class: "agy-feed" });
+      feed.appendChild(el("div", { class: "agy-turn" }, [
+        el("div", { class: "agy-msg-user" }, [
+          el("div", { class: "agy-rolebar" }, [el("span", { class: "agy-role you", text: "YOU" })]),
+          el("div", { class: "agy-msg-text" }, richText(full.pendingMessage || "", openFile)),
+        ]),
+      ]));
+      feed.appendChild(el("div", { class: "agy-pendrow" }, [
+        el("span", { class: "agy-dot" }),
+        el("span", { class: "t", text: "starting agy in " + (full.project || full.shortWorkspace || "this workspace") + "…" }),
+      ]));
+      viewEl.appendChild(feed);
+      compHost.appendChild(el("div", { class: "agy-comp-strip" }, [
+        el("div", { class: "agy-comp" }, [
+          el("div", { class: "agy-comp-disabled", text: "Starting agy — the composer opens once the conversation is ready." }),
+        ]),
+      ]));
+      viewTick = null;
+      return;
+    }
+
     const feed = el("div", { class: "agy-feed" });
     viewEl.appendChild(feed);
     const approvalBox = el("div", { class: "agy-convo-approval" });
@@ -2171,6 +2199,7 @@ function renderAgyMonitor(tool) {
       for (const a of aps) wrap.appendChild(approvalCard(a, false));
       approvalBox.appendChild(wrap);
     }
+    S.approvalRefresh = drawApprovals; // answerApproval calls this to clear the card instantly
 
     // ---- transcript polling with row reconciliation ----
     const rows = [];
@@ -2312,6 +2341,7 @@ function renderAgyMonitor(tool) {
           el("button", { class: "no", text: "✕", title: "deny", onclick: () => answerApproval(a, "deny") }),
         ]));
       }
+      pane.drawApproval = drawApproval;
 
       pane.load = async function () {
         let res;
@@ -2396,6 +2426,7 @@ function renderAgyMonitor(tool) {
     for (const p of panes) wrap.appendChild(p.el);
     const first = panes[S.paneFocus] || panes[0];
     if (first) { S.splitCtx = first.ctx; S.activeComposer = first.composer || null; }
+    S.approvalRefresh = () => panes.forEach((p) => { try { p.drawApproval(); } catch {} });
     viewTick = () => Promise.all(panes.map((p) => p.load()));
     viewTick();
   }
@@ -2948,8 +2979,23 @@ function renderAgyMonitor(tool) {
     viewEl.appendChild(page);
     page.appendChild(el("h2", { text: "New chat" }));
 
+    // An unsent draft (workspace + first message) survives navigating away and
+    // reloads, like the conversation composer. An explicit ctx (a bounce-back
+    // from a failed start, or a ?new= URL) wins over the stored draft.
+    const NC_DRAFT_KEY = "agy-newchat-draft";
+    let draft = {};
+    try { draft = JSON.parse(localStorage.getItem(NC_DRAFT_KEY) || "{}") || {}; } catch {}
+    const saveDraft = () => {
+      try {
+        const d = { workspace: wsInput.value, message: ta.value };
+        if ((d.workspace || "").trim() || (d.message || "").trim()) localStorage.setItem(NC_DRAFT_KEY, JSON.stringify(d));
+        else localStorage.removeItem(NC_DRAFT_KEY);
+      } catch {}
+    };
+    const clearDraft = () => { try { localStorage.removeItem(NC_DRAFT_KEY); } catch {} };
+
     let allWorkspaces = [];
-    const wsInput = el("input", { class: "agy-ws-input", type: "text", placeholder: "type a folder path, or pick a recent workspace…", value: ctx.workspace || "" });
+    const wsInput = el("input", { class: "agy-ws-input", type: "text", placeholder: "type a folder path, or pick a recent workspace…", value: ctx.workspace || draft.workspace || "" });
     const wsMenu = el("div", { class: "agy-ws-menu", style: { display: "none" } });
     function renderMenu() {
       const q = (wsInput.value || "").trim().toLowerCase();
@@ -2966,6 +3012,7 @@ function renderAgyMonitor(tool) {
     }
     wsInput.addEventListener("focus", renderMenu);
     wsInput.addEventListener("input", renderMenu);
+    wsInput.addEventListener("input", saveDraft);
     wsInput.addEventListener("blur", () => setTimeout(() => { wsMenu.style.display = "none"; }, 150));
     page.appendChild(el("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } }, [
       el("span", { class: "agy-field-label", text: "WORKSPACE" }),
@@ -2973,6 +3020,7 @@ function renderAgyMonitor(tool) {
     ]));
 
     const ta = el("textarea", { class: "agy-nc-ta", rows: "5", placeholder: "Your first message — agy starts a fresh conversation in this folder…" });
+    ta.addEventListener("input", saveDraft);
     page.appendChild(ta);
 
     // ---- options card: LAUNCH / MODEL / PERMISSIONS / SAFETY ----
@@ -2980,9 +3028,9 @@ function renderAgyMonitor(tool) {
     const nc = S.newChat || (S.newChat = { mode: "single", n: 3, model: null, perm: "default", gated: true, review: false });
     // arriving from a fan-out launcher (header ⑃ removed; slash /fanout + ⌘K route here):
     // prefill the task and, unless a fan strategy is already remembered, preset best-of-N.
-    if (ctx.message) ta.value = ctx.message;
+    ta.value = ctx.message || draft.message || "";
     if (ctx.fanout && nc.mode === "single") nc.mode = "best";
-    if (ctx.message || ctx.fanout) setTimeout(() => ta.focus(), 0);
+    if (ta.value || ctx.fanout) setTimeout(() => ta.focus(), 0);
     let models = []; // from `agy models` (null model = agy's configured default)
     const optsCard = el("div", { class: "agy-nc-card" });
     function chip(label, on, pick, title, cls) {
@@ -3037,6 +3085,7 @@ function renderAgyMonitor(tool) {
           const res = await runTool(tool.id, { action: "fanout-start", workspace, task: message, strategy: nc.mode, n: nc.n });
           if (res && res.ok) {
             if (shell) shell.toast("⑃ " + nc.n + " workers launched in isolated worktrees");
+            clearDraft();
             tick();
             go({ kind: "fanout", id: res.id });
             return;
@@ -3045,7 +3094,20 @@ function renderAgyMonitor(tool) {
         } catch (e) { status.textContent = "error: " + (e && e.message ? e.message : e); }
         return;
       }
-      status.textContent = "starting agy…";
+      // Jump straight into the conversation with a "starting agy…" placeholder,
+      // then resolve the real id in the background. The pendingId lets us tell
+      // whether the user is still on THIS placeholder when the request returns.
+      const project = workspace.split("/").pop();
+      const pendingId = "p" + Date.now() + Math.random().toString(36).slice(2);
+      go({ kind: "convo", ctx: { workspace, project, shortWorkspace: workspace, title: "Starting…", pendingStart: true, pendingMessage: message, pendingId } });
+      const stillPending = () => S.view.kind === "convo" && S.view.ctx && S.view.ctx.pendingId === pendingId;
+      const bounceToForm = (why) => {
+        if (shell && why) shell.toast(why);
+        if (!stillPending()) return;
+        render({ kind: "newchat", ctx: { workspace, message } }); // re-mount the form, message + options preserved
+        const st = { kind: "newchat", ctx: { workspace } };
+        history.replaceState(Object.assign({ navDepth: S.navDepth }, st), "", urlFor(st));
+      };
       try {
         const res = await runTool(tool.id, {
           action: "new-conversation", workspace, message,
@@ -3056,11 +3118,22 @@ function renderAgyMonitor(tool) {
         });
         if (res && res.ok && res.conversationId) {
           if (shell) shell.toast(nc.gated ? "▸ Started gated — commands route through the approval gate" : "▸ Started ungated");
-          openConvo({ conversationId: res.conversationId, workspace: res.workspace, project: (res.workspace || "").split("/").pop(), shortWorkspace: res.workspace });
+          clearDraft(); // it started — the draft is no longer "unsent"
+          const ctx = { conversationId: res.conversationId, workspace: res.workspace, project: (res.workspace || workspace).split("/").pop(), shortWorkspace: res.workspace };
+          if (stillPending()) {
+            history.replaceState(Object.assign({ navDepth: S.navDepth }, { kind: "convo", ctx }), "", urlFor({ kind: "convo", ctx }));
+            render({ kind: "convo", ctx }); // upgrade the placeholder to the live conversation in place
+          }
           return;
         }
-        status.textContent = res && res.ok ? (res.message || "started — open history to find it") : ((res && res.message) || "failed to start");
-      } catch (e) { status.textContent = "error: " + (e && e.message ? e.message : e); }
+        if (res && res.ok) { // started but no id within the window — it's registering; don't offer a re-submit
+          clearDraft();
+          bounceToForm("▸ Started — it's taking a moment to register; find it in History shortly");
+          return;
+        }
+        // an outright failure — bounce back with the draft intact so nothing is lost
+        bounceToForm("Couldn't start — " + ((res && res.message) || "failed to start"));
+      } catch (e) { bounceToForm("Error: " + (e && e.message ? e.message : e)); }
     }
     const startBtn = el("button", { class: "agy-btn", text: "Start chat", onclick: () => start() });
     ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); start(); } });
@@ -3356,6 +3429,7 @@ function renderAgyMonitor(tool) {
     S.view = view || { kind: "overview" };
     S.overviewRefresh = null;
     S.setupRefresh = null;
+    S.approvalRefresh = null; // convo/split views set this so answerApproval can redraw them instantly
     viewTick = null;
     if (S.view.kind === "split") {
       if (Array.isArray(S.view.panes) && S.view.panes.length) S.panes = S.view.panes.slice();

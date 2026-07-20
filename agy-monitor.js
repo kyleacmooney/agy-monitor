@@ -90,6 +90,24 @@ function humanDuration(sec) {
   return `${h}h ${m % 60}m`;
 }
 
+// BSD `ps` renders control characters in the args column as 3-digit octal
+// (a newline → "\012") and a literal backslash as "\\". Decode both in a single
+// left-to-right pass so "\\012" (a real backslash followed by "012") is never
+// misread as a newline. This is only needed for the ps-scraped prompt below.
+function unescapePsArg(s) {
+  if (typeof s !== "string" || s.indexOf("\\") < 0) return s;
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\" && i + 1 < s.length) {
+      if (s[i + 1] === "\\") { out += "\\"; i += 1; continue; }
+      const oct = s.slice(i + 1, i + 4);
+      if (/^[0-7]{3}$/.test(oct)) { out += String.fromCharCode(parseInt(oct, 8)); i += 3; continue; }
+    }
+    out += s[i];
+  }
+  return out;
+}
+
 function classifyArgs(argv) {
   const joined = argv.join(" ");
   const has = (...flags) => argv.some((a) => flags.includes(a));
@@ -101,7 +119,10 @@ function classifyArgs(argv) {
 
   let prompt = null;
   const m = joined.match(/(?:^|\s)(?:-p|--print|--prompt|-i|--prompt-interactive)\s+(.+)$/);
-  if (m) prompt = m[1].trim();
+  // Decode ps's escaping, then strip the injected ```ask convention block (the
+  // "[[UI-ASK-RULES]] …" plumbing appended to every UI-launched -p) so the live
+  // session's title shows the user's words, not the instruction preamble.
+  if (m) prompt = stripUserRequest(unescapePsArg(m[1])) || null;
   return { mode, prompt, sandbox: has("--sandbox"), skipPerms: has("--dangerously-skip-permissions") };
 }
 
@@ -1751,7 +1772,7 @@ const agyMonitor = {
   },
 };
 
-module.exports = { agyMonitor, listAgySessions, deriveState, displayLiveState, BUSY_STALE_MS };
+module.exports = { agyMonitor, listAgySessions, deriveState, displayLiveState, BUSY_STALE_MS, classifyArgs, unescapePsArg };
 
 if (require.main === module) {
   agyMonitor.run({ action: "fetch-sessions" }).then((res) => {

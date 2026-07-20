@@ -36,7 +36,7 @@ const selfUpdate = require("./agy-selfupdate");
 const PKG = require("./package.json");
 
 const PUBLIC_DIR = path.join(__dirname, "public");
-const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json", ".webmanifest": "application/manifest+json; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png" };
 const RATE_LIMIT = { windowMs: 60000, max: 600 }; // POSTs per IP per minute — the v3 console makes ~9 RPCs per refresh tick
 const BODY_CAP = 12 << 20; // 12 MB — composer attachments arrive base64 in upload-attachment
 const SSE_HEARTBEAT_MS = 25000;

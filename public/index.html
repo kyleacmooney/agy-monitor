@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>agy_monitor</title>
 <meta name="theme-color" content="#141412" />
+<!-- Installable PWA: Chrome/Edge "Install app" opens agy-monitor in its own
+     standalone window (no tab, no address bar) instead of a browser tab. -->
+<link rel="manifest" href="/manifest.webmanifest" />
+<link rel="icon" type="image/png" href="/icon-192.png" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="agy_monitor" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -32,6 +41,12 @@
 <script>
   const root = document.getElementById("root");
   for (const node of window.RENDERERS["agy-monitor"]({ id: "agy-monitor", title: "agy_monitor" })) root.appendChild(node);
+  // Register the service worker (a bare network passthrough) so the app is
+  // installable as a standalone window. It caches nothing — this is a live local
+  // console that self-updates, so stale offline copies would do more harm than good.
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => { navigator.serviceWorker.register("/sw.js").catch(() => {}); });
+  }
 </script>
 </body>
 </html>
