@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>agy_monitor</title>
+<meta name="theme-color" content="#141412" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div id="root"></div>
+
+<div id="signin" class="agy-modal-scrim" style="display:none">
+  <div class="agy-modal">
+    <h2>Sign in</h2>
+    <p class="note">This agy-monitor requires an access token.</p>
+    <input id="signin-token" type="password" placeholder="access token" autocomplete="off" />
+    <div class="bar">
+      <span id="signin-err" class="err"></span>
+      <button id="signin-go" class="agy-btn sm">Sign in</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" class="agy-toasts"></div>
+
+<script src="/app.js"></script>
+<script src="/render-agy-monitor.js"></script>
+<script>
+  const root = document.getElementById("root");
+  for (const node of window.RENDERERS["agy-monitor"]({ id: "agy-monitor", title: "agy_monitor" })) root.appendChild(node);
+</script>
+</body>
+</html>
