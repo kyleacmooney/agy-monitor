@@ -109,6 +109,8 @@ summary { list-style: none; }
   border-radius: 4px; cursor: pointer; white-space: nowrap; user-select: none;
 }
 .agy-ghost:hover { color: var(--text); border-color: rgba(255,255,255,0.24); }
+.agy-ghost.xs { font-size: 11px; padding: 3px 10px; border-radius: 3px; }  /* == .agy-btn.xs */
+.agy-ghost:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(226,163,61,0.5); }
 .agy-hbtn {  /* header action */
   display: inline-flex; align-items: center; font-size: 11.5px; font-weight: 500; color: var(--sec);
   padding: 4px 9px; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; cursor: pointer;
@@ -1022,7 +1024,7 @@ summary { list-style: none; }
 }
 .agy-cand-sub { font: 400 11px var(--mono); color: var(--faint); white-space: nowrap; }
 .agy-cand-ex {
-  font: 400 11.5px var(--mono); background: var(--code); border: 1px solid rgba(255,255,255,0.07);
+  font: 400 11.5px var(--mono); background: var(--code); border: 1px solid var(--hair07);
   border-radius: 4px; padding: 7px 11px; color: var(--sec); white-space: pre-wrap; word-break: break-word;
 }
 .agy-empty-dash { border: 1px dashed var(--hair12); border-radius: 6px; padding: 18px; text-align: center; font-size: 12.5px; color: var(--faint); }
@@ -1031,7 +1033,12 @@ summary { list-style: none; }
 .agy-decrow .v.allow { color: var(--green); }
 .agy-decrow .v.deny { color: var(--red); }
 .agy-decrow .cmd { flex: 1; min-width: 0; font: 400 11.5px var(--mono); color: var(--codetext); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.agy-decrow .why { font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+/* min-width:0 + a steeper shrink so the REASON yields space before the command does:
+   without it the reason's min-content width wins and .cmd collapses to nothing */
+.agy-decrow .why { font-size: 11.5px; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; min-width: 0; flex-shrink: 4; }
+/* .cmd is flex-basis:0, so in an overflowing row it wins no space at all — a floor
+   keeps the command (the point of the row) legible instead of collapsing to 0px */
+.agy-decrow .cmd { min-width: 72px; }
 .agy-decrow .meta { font: 400 10.5px var(--mono); color: var(--dis); flex-shrink: 0; }
 
 /* context view */
@@ -1190,15 +1197,144 @@ summary { list-style: none; }
 .agy-ncchip.on.green { color: var(--green); border-color: rgba(127,201,141,0.4); }
 .agy-ncchip.on.amber { color: var(--amber); border-color: rgba(226,163,61,0.45); }
 
-/* safelist: current allow-list rule chips */
-.agy-rulewrap { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.agy-rule {
-  display: inline-flex; align-items: center; gap: 7px; padding: 4px 8px;
-  border: 1px solid var(--hair12); border-radius: 4px; background: #191917;
+/* ============================= safelist view ============================= */
+/* page rhythm: 20px between sections vs .agy-ov-sec's 8px inside them, so a
+   section boundary finally reads heavier than a label→content one. 20px == .agy-ov. */
+.agy-page.agy-sl { gap: 20px; }
+
+/* ruled section header — the label becomes an edge, not a floating word.
+   --hair08 (== .agy-cardlist), never --hair05: that one is a row separator
+   inside cards and composites to ~1.1:1 on --bg. */
+.agy-sl-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding-bottom: 7px; border-bottom: 1px solid var(--hair08);
 }
-.agy-rule .src { font: 400 8.5px var(--mono); letter-spacing: 0.08em; color: var(--green); }
-.agy-rule .x { font: 500 11px var(--mono); color: var(--dis); cursor: pointer; }
-.agy-rule .x:hover { color: var(--red); }
+/* no flex-wrap: the path must ellipsize beside the label, not drop to its own line.
+   min-width:0 lets the label wrap internally instead of clipping its "· N" count. */
+.agy-sl-head .agy-lbl { flex: 0 1 auto; min-width: 0; }
+
+/* settings.json path — the header's right slot, attached to the label it describes */
+.agy-sl-path {
+  font: 400 10px var(--mono); color: var(--faint); max-width: 52%;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* the one line that states command(…) semantics — == .agy-ctx-note */
+.agy-sl-note { font-size: 11.5px; color: var(--sec); }
+/* search match summary + "showing 50" — == .agy-hint, but --faint (--dis is 2.4:1) */
+.agy-sl-sum { font: 400 10px var(--mono); letter-spacing: 0.06em; color: var(--faint); }
+/* a list we could not read is not an empty list — colors == .agy-setup-banner.fail */
+.agy-sl-err {
+  border: 1px solid rgba(255,115,89,0.3); background: rgba(255,115,89,0.07);
+  border-radius: 4px; padding: 7px 11px; font: 400 11.5px var(--mono); color: var(--red);
+}
+/* empty states here are one dim line, not a dashed slab. modifier only — the base
+   .agy-empty-dash has 7 call sites elsewhere, several of them error states. */
+.agy-empty-dash.quiet {
+  border: none; border-radius: 0; padding: 2px 0; text-align: left;
+  font: 400 11.5px var(--mono); color: var(--faint);
+}
+
+/* ---- rule chips: one border, no command(…) wrapper, ✕ on hover ---- */
+/* margin-top dropped — .agy-ov-sec already gaps label → content by 8px */
+.agy-rulewrap { display: flex; flex-wrap: wrap; gap: 6px; }
+.agy-rule {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  padding: 3px 4px 3px 9px;            /* 9px left == .agy-ncchip; right is the ✕'s own box */
+  border: 1px solid var(--hair12); border-radius: 4px;
+  background: var(--card);             /* was the literal #191917 — same value, on-token */
+}
+/* the prefix, and nothing else. 11.5px mono/--codetext == .agy-decrow .cmd: the
+   file's "verbatim shell text" voice. amber is now spent only on candidates. */
+.agy-rule .pat {
+  min-width: 0; max-width: 340px;
+  font: 400 11.5px var(--mono); color: var(--codetext);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* promoted from this dashboard — the chip's own left border turns green.
+   thickening the existing border keeps "one border per chip"; 9-1=8px keeps
+   the text on the same optical inset. */
+.agy-rule.promoted { border-left-width: 2px; border-left-color: var(--green); padding-left: 8px; }
+/* command(*) matches EVERY command (agy-policy.js) — it must not look like command(wc) */
+.agy-rule.k-wide { border-color: rgba(255,115,89,0.3); }
+.agy-rule.k-wide .pat { color: var(--red); }
+/* not a command(…) entry — the shell gate skips it, so it auto-approves nothing.
+   rendered verbatim and allowed to wrap: never tail-truncate an identifier the
+   ✕ beside it is about to delete. */
+.agy-rule.k-inert .pat {
+  color: var(--sec); max-width: 420px;
+  white-space: normal; word-break: break-all; overflow: visible; text-overflow: clip;
+}
+/* == .agy-srctag minus its border (one border per chip) */
+.agy-rule .tag {
+  flex-shrink: 0; font: 500 9px var(--mono); letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--faint);
+}
+/* how many commands this rule auto-approved in the window. sits on the --inset plate
+   so it reads as a datum rather than more prefix text. */
+.agy-rule .use {
+  flex-shrink: 0; font: 500 10px var(--mono); color: var(--sec);
+  background: var(--inset); border-radius: 3px; padding: 1px 5px; min-width: 18px; text-align: center;
+}
+.agy-rule .use.zero { color: var(--sec); }   /* --faint is 3.4:1 on --inset; this is a number to read */
+/* fired nothing in the window and old enough for that to mean something — recede,
+   but stay legible: --sec is 5.3:1, this is still a live permission */
+.agy-rule.unused { border-style: dashed; }
+.agy-rule.unused .pat { color: var(--sec); }
+
+/* undo-after-remove. no animation: draw() re-runs on every keystroke and a
+   fade would replay each time. */
+.agy-sl-undo {
+  display: flex; align-items: center; gap: 10px; padding: 6px 11px;
+  border: 1px solid rgba(127,201,141,0.3); background: rgba(127,201,141,0.06); border-radius: 4px;
+}
+.agy-sl-undo .t { flex: 1; min-width: 0; font: 400 11.5px var(--mono); color: var(--body);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agy-sl-undo .d {
+  flex-shrink: 0; appearance: none; -webkit-appearance: none; background: transparent; border: 0;
+  font: 500 11px var(--mono); color: var(--sec); cursor: pointer; padding: 4px 6px; border-radius: 3px;
+}
+.agy-sl-undo .d:hover { color: var(--red); }
+.agy-sl-undo .d:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(226,163,61,0.5); }
+/* the ✕ — a real <button>: tabbable, Enter/Space, named by aria-label.
+   ::after grows the POINTER target to 24x24 at zero layout cost. Was --dis,
+   which is 2.28:1 on --card — too dark for a destructive control. */
+.agy-rule .x {
+  position: relative; flex-shrink: 0; width: 16px; height: 16px; padding: 0; margin: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  appearance: none; -webkit-appearance: none; background: transparent; border: 0;
+  border-radius: 3px; font: 500 11px var(--mono); line-height: 1; color: var(--faint);
+  cursor: pointer; user-select: none;
+  opacity: 0; transition: opacity .12s linear;
+}
+.agy-rule .x::after { content: ""; position: absolute; inset: -4px; }
+/* the box is reserved at rest, so the cloud never reflows under the cursor */
+.agy-rule:hover .x,
+.agy-rule:focus-within .x { opacity: 1; }
+.agy-rule .x:hover { color: var(--red); background: rgba(255,115,89,0.12); }
+.agy-rule .x:focus-visible {
+  opacity: 1; outline: none; color: var(--red);
+  box-shadow: 0 0 0 2px rgba(226,163,61,0.5);
+}
+/* no hover means a hidden destructive control is an unreachable one. hover:none
+   alone misses touchscreen laptops (they report hover:hover), so pointer:coarse rides along. */
+@media (hover: none), (pointer: coarse) { .agy-rule .x { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .agy-rule .x { transition: none; } }
+
+/* ---- candidates ---- */
+.agy-cand-done { font: 500 10.5px var(--mono); color: var(--green); flex-shrink: 0; }
+/* Promote drops off the white .agy-btn plate: on a page about how much runs
+   unsupervised, the loudest control should not be "grant more". == .agy-hbtn.accent */
+.agy-ghost.accent { color: var(--amber); border-color: rgba(226,163,61,0.35); }
+.agy-ghost.accent:hover { color: var(--amber); background: rgba(226,163,61,0.08); border-color: rgba(226,163,61,0.45); }
+
+/* ---- decisions ---- */
+.agy-decrow:last-child { border-bottom: none; }   /* kills the hairline doubled by .agy-cardlist */
+.agy-decrow .v.other { color: var(--faint); }     /* never paint a non-allow verdict green */
+/* on a phone the reason can't coexist with the command — drop the secondary one.
+   it stays available in the row's title. scoped to this view's list so the shared
+   .agy-cardlist elsewhere is untouched. (precedent: .agy-comp-bar's @container) */
+[data-sec="decisions"] .agy-cardlist { container-type: inline-size; }
+@container (max-width: 460px) { .agy-decrow .why { display: none; } }
 
 /* ============================= setup / onboarding ============================= */
 .agy-setup-banner {

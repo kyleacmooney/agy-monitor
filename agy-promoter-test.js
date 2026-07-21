@@ -253,6 +253,208 @@ function main() {
     delete process.env.AGY_PROMOTER_SNOOZE_MS;
   });
 
+  // ---- listRules: per-rule usage attribution ------------------------------
+  console.log("\n# listRules uses");
+  const fired = (over) => row(Object.assign({ stage: "safelist-allow", outcome: "safelist-allow", classifier: null }, over));
+
+  test("uses counts only the rows the safelist itself let through, per rule", () => {
+    const root = freshRoot(); settingsWith(["command(git diff)", "command(wc)"]);
+    writeDecisions(root, [
+      fired({ atoms: ["git diff"] }),
+      fired({ atoms: ["git diff"] }),
+      fired({ atoms: ["wc"] }),
+      // a manual approval is NOT the safelist firing — the human did the work
+      row({ atoms: ["git diff"], stage: "manual", outcome: "manual-approve" }),
+    ]);
+    const r = P.listRules();
+    assert.ok(r.ok && r.usesKnown, "usesKnown once safelist-allow rows exist");
+    const by = (rule) => r.rules.find((x) => x.rule === rule);
+    assert.strictEqual(by("command(git diff)").uses, 2, "two safelist-allow rows, not three");
+    assert.strictEqual(by("command(wc)").uses, 1);
+  });
+
+  test("a compound row credits every rule that covered one of its atoms", () => {
+    const root = freshRoot(); settingsWith(["command(git log)", "command(wc)", "command(sort)"]);
+    writeDecisions(root, [fired({ command: "git log | wc -l", atoms: ["git log", "wc"] })]);
+    const r = P.listRules();
+    const by = (rule) => r.rules.find((x) => x.rule === rule).uses;
+    assert.strictEqual(by("command(git log)"), 1);
+    assert.strictEqual(by("command(wc)"), 1, "both atoms' rules are credited");
+    assert.strictEqual(by("command(sort)"), 0, "an uninvolved rule is not");
+  });
+
+  test("prefix and wildcard rules use the gate's own matcher", () => {
+    const root = freshRoot(); settingsWith(["command(git)", "command(*)"]);
+    writeDecisions(root, [fired({ atoms: ["git push --force"] })]);
+    const r = P.listRules();
+    const by = (rule) => r.rules.find((x) => x.rule === rule).uses;
+    assert.strictEqual(by("command(git)"), 1, "space-prefix match counts");
+    assert.strictEqual(by("command(*)"), 1, "the wildcard matches everything");
+  });
+
+  test("logSpansWindow is false for a log younger than the window", () => {
+    const root = freshRoot(); settingsWith(["command(git diff)", "command(wc)"]);
+    writeDecisions(root, [fired({ atoms: ["git diff"], ts: ago(2 * 60 * 60 * 1000) })]);
+    const r = P.listRules();
+    assert.ok(r.usesKnown, "we do have data");
+    assert.strictEqual(r.logSpansWindow, false, "…but not 30 days of it, so nothing may be called dead");
+  });
+
+  test("logSpansWindow is true once the log reaches back the full window", () => {
+    const root = freshRoot(); settingsWith(["command(git diff)"]);
+    writeDecisions(root, [
+      fired({ atoms: ["git diff"] }),
+      row({ atoms: ["x"], ts: ago(31 * 24 * 60 * 60 * 1000) }),   // outside the window, but proves reach
+      row({ atoms: ["y"], ts: ago(29.5 * 24 * 60 * 60 * 1000) }), // oldest row still inside it
+    ]);
+    assert.strictEqual(P.listRules().logSpansWindow, true);
+  });
+
+  test("usesKnown is false when the log holds no safelist-allow rows at all", () => {
+    const root = freshRoot(); settingsWith(["command(git diff)"]);
+    writeDecisions(root, [row({ atoms: ["git diff"] })]); // classifier-auto-allow only
+    const r = P.listRules();
+    assert.strictEqual(r.usesKnown, false, "0 must not be presented as 'this rule is dead'");
+    assert.strictEqual(r.rules[0].uses, 0);
+  });
+
+  test("listRules exposes the promotion timestamp so a new rule isn't called unused", () => {
+    freshRoot(); settingsWith([]);
+    P.promoteRule("git diff");
+    const r = P.listRules();
+    assert.ok(r.rules[0].promoted, "promoted flag survives");
+    assert.ok(r.rules[0].promotedTs && !Number.isNaN(Date.parse(r.rules[0].promotedTs)), "with a parseable ts");
+  });
+
+  // ---- restoreRule (undo a demote) ----------------------------------------
+  console.log("\n# restoreRule");
+  test("restores a single-token rule that promoteRule would refuse to create", () => {
+    freshRoot();
+    const file = settingsWith(["command(wc)"]);
+    assert.ok(P.demoteRule("command(wc)").ok);
+    assert.ok(!P.promoteRule("wc").ok, "promote still refuses a bare single binary (the veto is intact)");
+    const res = P.restoreRule("command(wc)");
+    assert.ok(res.ok, "restore does not re-veto: " + (res.message || ""));
+    const allow = JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow;
+    assert.ok(allow.includes("command(wc)"), "the rule is back in permissions.allow");
+  });
+
+  test("restore writes a backup and records the restoration", () => {
+    const root = freshRoot();
+    const file = settingsWith(["command(git log)"]);
+    P.demoteRule("command(git log)");
+    const res = P.restoreRule("command(git log)");
+    assert.ok(res.backup && fs.existsSync(res.backup), "settings.json backed up before the write");
+    const state = JSON.parse(fs.readFileSync(path.join(root, "promoter-state.json"), "utf8"));
+    assert.ok(Array.isArray(state.restorations) && state.restorations.length === 1, "audit trail written");
+    assert.strictEqual(JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow.filter((x) => x === "command(git log)").length, 1);
+  });
+
+  test("restoring twice never duplicates the rule", () => {
+    freshRoot(); const file = settingsWith(["command(head)"]);
+    P.demoteRule("command(head)");
+    assert.ok(P.restoreRule("command(head)").ok);
+    assert.ok(!P.restoreRule("command(head)").ok, "the ledger entry was consumed by the first undo");
+    assert.strictEqual(JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow.filter((x) => x === "command(head)").length, 1);
+  });
+
+  test("restore is a no-op when the rule is already back by other means", () => {
+    freshRoot(); const file = settingsWith(["command(head)"]);
+    P.demoteRule("command(head)");
+    // the user re-added it by hand before clicking Undo
+    fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ["command(head)"] } }, null, 2));
+    const res = P.restoreRule("command(head)");
+    assert.ok(res.ok && res.alreadyAllowed, "reports already-present rather than duplicating");
+    assert.strictEqual(JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow.length, 1);
+  });
+
+  test("restore preserves a non-command() rule verbatim", () => {
+    freshRoot(); const file = settingsWith(["mcp__playwright__browser_click"]);
+    P.demoteRule("mcp__playwright__browser_click");
+    assert.ok(P.restoreRule("mcp__playwright__browser_click").ok);
+    assert.ok(JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow.includes("mcp__playwright__browser_click"));
+  });
+
+  test("restore rejects an empty rule", () => {
+    freshRoot(); settingsWith([]);
+    assert.ok(!P.restoreRule("").ok);
+    assert.ok(!P.restoreRule(null).ok);
+  });
+
+  // Undo must not become a way around the veto that promoteRule enforces.
+  test("restore refuses a rule this dashboard never removed", () => {
+    freshRoot(); const file = settingsWith([]);
+    const res = P.restoreRule("command(*)");
+    assert.ok(!res.ok, "an arbitrary rule cannot be injected via restore");
+    assert.ok(/not removed/.test(res.message || ""), "and it says why: " + res.message);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow, [], "settings untouched");
+  });
+
+  test("restore refuses command(*) even if it really was demoted", () => {
+    freshRoot(); const file = settingsWith(["command(*)"]);
+    assert.ok(P.demoteRule("command(*)").ok);
+    const res = P.restoreRule("command(*)");
+    assert.ok(!res.ok, "undo must not help put the gate-disabling rule back");
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow, []);
+  });
+
+  test("one removal buys exactly one undo", () => {
+    freshRoot(); const file = settingsWith(["command(git log)"]);
+    P.demoteRule("command(git log)");
+    assert.ok(P.restoreRule("command(git log)").ok);
+    P.demoteRule("command(git log)");                 // removed again, by hand this time
+    assert.ok(P.restoreRule("command(git log)").ok, "a fresh demote grants a fresh undo");
+    // but a stale ledger entry cannot be replayed once consumed
+    const allow = JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow;
+    assert.deepStrictEqual(allow, ["command(git log)"]);
+  });
+
+  test("restore refuses to overwrite a settings.json it cannot parse", () => {
+    freshRoot();
+    const file = settingsWith(["command(wc)"]);
+    P.demoteRule("command(wc)");
+    fs.writeFileSync(file, '{"model":"x","permissions":{"deny":["command(rm)"]},,,BROKEN');
+    const res = P.restoreRule("command(wc)");
+    assert.ok(!res.ok, "a corrupt settings.json must not be silently replaced");
+    assert.ok(/not readable JSON/.test(res.message || ""), res.message);
+    assert.ok(/BROKEN/.test(fs.readFileSync(file, "utf8")), "the user's file is left exactly as it was");
+  });
+
+  test("restore only re-adds the exact string that was demoted", () => {
+    freshRoot(); const file = settingsWith(["command(git log)"]);
+    P.demoteRule("command(git log)");
+    assert.ok(!P.restoreRule("command(git)").ok, "a WIDER neighbour of the demoted rule is refused");
+    assert.ok(P.restoreRule("command(git log)").ok);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow, ["command(git log)"]);
+  });
+
+  // Same hazard as the restore case above, on the path that is FAR more travelled —
+  // Promote is one click from the candidates list. readJsonSafe returns null for both
+  // "missing" and "unparseable", and promote used to rebuild `{}` from either, which
+  // silently discarded permissions.DENY along with every other key in the file.
+  test("promote refuses to overwrite a settings.json it cannot parse", () => {
+    freshRoot();
+    const file = settingsWith(["command(wc)"]);
+    fs.writeFileSync(file, '{"model":"x","permissions":{"deny":["command(rm)"],"allow":["command(wc)"]},,,BROKEN');
+    const res = P.promoteRule("git diff");
+    assert.ok(!res.ok, "a corrupt settings.json must not be silently replaced");
+    assert.ok(/not readable JSON/.test(res.message || ""), res.message);
+    const after = fs.readFileSync(file, "utf8");
+    assert.ok(/BROKEN/.test(after), "the user's file is left exactly as it was");
+    assert.ok(/command\(rm\)/.test(after), "permissions.deny survives");
+  });
+
+  test("promote still creates settings.json when it is genuinely absent", () => {
+    const root = freshRoot();
+    // the guard keys on existsSync, so the never-created case must stay working
+    const file = path.join(root, "nested", "settings.json");
+    process.env.AGY_GATE_SETTINGS = file;
+    assert.ok(!fs.existsSync(file), "precondition: no settings file");
+    const res = P.promoteRule("git diff");
+    assert.ok(res.ok, res.message);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow, ["command(git diff)"]);
+  });
+
   // ---- listDecisions ------------------------------------------------------
   console.log("\n# listDecisions");
   test("listDecisions returns rows newest-first within the window and drops older rows", () => {

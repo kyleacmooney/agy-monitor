@@ -2894,82 +2894,251 @@ function renderAgyMonitor(tool) {
   }
 
   // -- safelist --
+  // Byte-identical to agy-policy.js's atomMatchesAllow so the chip shows exactly what
+  // the gate will read. Greedy + $-anchored, so command(sh -c (x)) keeps its inner parens.
+  const RULE_CMD = /^command\((.+)\)$/;
+  function parseRule(raw) {
+    const s = String(raw == null ? "" : raw);
+    const m = RULE_CMD.exec(s);
+    if (!m) return { kind: "k-inert", label: s };            // the gate skips it — auto-approves nothing
+    const pat = m[1].trim();
+    if (!pat) return { kind: "k-inert", label: s };           // "command()" / "command(   )"
+    if (pat === "*") return { kind: "k-wide", label: "*" };   // matches EVERY command
+    return { kind: "", label: pat };
+  }
+  function shortHome(p) { return String(p).replace(/^\/(?:Users|home)\/[^/]+\//, "~/"); }
+
   function mountSafelist() {
     viewTick = null;
     clear(viewEl); clear(compHost);
-    const page = el("div", { class: "agy-page" });
+    const page = el("div", { class: "agy-page agy-sl" });
     viewEl.appendChild(page);
-    const search = el("input", { class: "agy-search", type: "text", placeholder: "Search the safelist, candidates, and gate decisions — try 'npm', 'deny', 'rm'…" });
+    const search = el("input", {
+      class: "agy-search", type: "text", spellcheck: "false",
+      "aria-label": "Filter safelist rules, candidates, and gate decisions",
+      placeholder: "Filter rules, candidates, and gate decisions — 'npm', 'deny', 'rm'…",
+    });
     page.appendChild(search);
-    const ruleSec = el("div", { class: "agy-ov-sec" });
-    const candSec = el("div", { class: "agy-ov-sec" });
-    const decSec = el("div", { class: "agy-ov-sec" });
+    // rendered only while filtering, so an idle page reserves no dead line
+    const sumLine = el("div", { class: "agy-sl-sum" });
+    sumLine.style.display = "none";
+    page.appendChild(sumLine);
+    const ruleSec = el("div", { class: "agy-ov-sec", "data-sec": "rules" });
+    const candSec = el("div", { class: "agy-ov-sec", "data-sec": "candidates" });
+    const decSec = el("div", { class: "agy-ov-sec", "data-sec": "decisions" });
     page.appendChild(ruleSec); page.appendChild(candSec); page.appendChild(decSec);
 
     let rules = [], rulesPath = "", cands = [], decs = [];
+    let phase = "loading";   // "loading" | "ready"
+    let rulesOk = false;     // false ⇒ never claim the safelist is empty
+    let errMsg = "";
+    let usesKnown = false;   // false ⇒ no safelist-allow rows at all; 0 means "no data", not "dead"
+    let logSpans = false;    // false ⇒ the log is younger than the window; never claim "unused"
+    let usesDays = 30;
+    let undo = null;         // the last removed rule, offered back until it's used or dismissed
+
+    // was `try { await runTool(...) } catch {}` — the response was discarded, so a
+    // refused promote ("refused to promote: …") and "already covered" were both silent
     async function act(action, atom) {
-      try { await runTool(tool.id, { action, atom }); } catch {}
+      let res;
+      try { res = await runTool(tool.id, { action, atom }); } catch {}
+      if (shell) {
+        if (!res) shell.toast("couldn't reach the monitor backend");
+        else if (!res.ok) shell.toast(res.message || "that didn't work");
+        else if (res.alreadyAllowed) shell.toast(res.message || "already covered by the safelist");
+      }
+      // a successful mutation elsewhere makes the old offer stale; a FAILED one changed
+      // nothing, so the way back must survive it
+      if (res && res.ok) undo = null;
       load();
     }
     async function demote(rule) {
       let res;
       try { res = await runTool(tool.id, { action: "demote-safelist-rule", rule }); } catch {}
-      if (shell) shell.toast(res && res.ok ? "removed from the safelist — " + rule + " asks again now" : ((res && res.message) || "failed to remove"));
+      const p = parseRule(rule);
+      const okd = !!(res && res.ok);
+      if (shell) shell.toast(okd
+        ? "removed — " + p.label + " asks for approval again" + (res.backup ? " · settings.json backed up" : "")
+        : ((res && res.message) || "failed to remove"));
+      // restore-safelist-rule puts the string back verbatim; promote would re-veto it.
+      // a failed demote removed nothing, so it must not discard a live offer either.
+      if (okd) undo = { rule, label: p.label };
       load();
     }
+    async function restore(rule) {
+      let res;
+      try { res = await runTool(tool.id, { action: "restore-safelist-rule", rule }); } catch {}
+      const p = parseRule(rule);
+      const okd = !!(res && res.ok);
+      if (shell) shell.toast(okd
+        ? (res.alreadyAllowed ? "already in the safelist" : "restored — " + p.label + " is auto-approved again")
+        : ((res && res.message) || "failed to restore"));
+      // keep the offer on failure — clearing it would strand the user with no route back
+      if (okd) undo = null;
+      load();
+    }
+
+    function head(labelText, right) {
+      return el("div", { class: "agy-sl-head" }, [
+        el("span", { class: "agy-lbl", text: labelText }),
+        right || null,
+      ]);
+    }
+    const quiet = (text) => el("div", { class: "agy-empty-dash quiet", text });
+
     function draw() {
       const q = (search.value || "").trim().toLowerCase();
       const rf = rules.filter((r) => !q || r.rule.toLowerCase().includes(q));
       const cf = cands.filter((c) => !q || (c.atom + " " + (c.examples || []).join(" ")).toLowerCase().includes(q));
-      const df = decs.filter((d) => !q || ((d.command || "") + " " + (d.reason || "") + " " + (d.decision || d.disposition || "")).toLowerCase().includes(q));
-      clear(ruleSec);
-      ruleSec.appendChild(el("span", { class: "agy-lbl", text: "CURRENT SAFELIST — AUTO-APPROVED · " + rf.length }));
-      if (rulesPath) ruleSec.appendChild(el("div", { class: "agy-sub-note", text: rulesPath }));
-      if (!rf.length) ruleSec.appendChild(el("div", { class: "agy-empty-dash", text: q ? "No safelist rules match." : "The safelist is empty — every command asks." }));
-      else {
-        const wrap = el("div", { class: "agy-rulewrap" });
-        for (const r of rf) {
-          wrap.appendChild(el("span", { class: "agy-rule" }, [
-            el("span", { class: "agy-atom", text: r.rule }),
-            r.promoted ? el("span", { class: "src", title: "promoted from this dashboard", text: "promoted" }) : null,
-            el("span", { class: "x", title: "remove — this command will ask for approval again", text: "✕", onclick: () => demote(r.rule) }),
+      // + outcome, so the new meta text stays findable by the same box
+      const df = decs.filter((d) => !q || ((d.command || "") + " " + (d.reason || "") + " " +
+        (d.decision || d.disposition || "") + " " + (d.outcome || d.stage || "")).toLowerCase().includes(q));
+
+      // a filtered count in the section label would read as "you have 0 rules"
+      sumLine.style.display = q ? "" : "none";
+      sumLine.textContent = q
+        ? rf.length + "/" + rules.length + " rules · " + cf.length + "/" + cands.length +
+          " candidates · " + df.length + "/" + decs.length + " decisions"
+        : "";
+
+      clear(ruleSec); clear(candSec); clear(decSec);
+      const loading = phase === "loading";
+
+      // ---- 1. current safelist ----
+      ruleSec.appendChild(head(
+        "CURRENT SAFELIST — AUTO-APPROVED" + (loading ? "" : " · " + rf.length),
+        rulesPath ? el("span", { class: "agy-sl-path", text: shortHome(rulesPath), title: rulesPath }) : null,
+      ));
+      if (errMsg) ruleSec.appendChild(el("div", { class: "agy-sl-err", text: errMsg }));
+      // the undo offer outlives draw(), so a keystroke in the filter box can't eat it
+      if (undo) {
+        // bind the rule this row was DRAWN with — `undo` is mutable and a click can land
+        // after another action reassigned it, which would restore the wrong rule
+        const u = undo;
+        ruleSec.appendChild(el("div", { class: "agy-sl-undo", role: "status", "aria-live": "polite" }, [
+          el("span", { class: "t", text: "removed " + u.label + " — it asks for approval again" }),
+          el("button", { class: "agy-ghost xs", type: "button", text: "Undo",
+            title: "put " + u.rule + " back in permissions.allow, exactly as it was",
+            onclick: () => restore(u.rule) }),
+          el("button", { class: "d", type: "button", text: "✕", "aria-label": "dismiss", title: "dismiss",
+            onclick: () => { undo = null; draw(); } }),
+        ]));
+      }
+      if (loading) {
+        ruleSec.appendChild(quiet("reading settings.json…"));
+      } else if (rulesOk) {
+        ruleSec.appendChild(el("div", { class: "agy-sl-note", text:
+          "Each entry is a command prefix — agy runs anything starting with it, at a word boundary, without asking. Hover a rule to remove it." +
+          (rules.some((r) => r.promoted) ? " A green edge marks rules promoted from this dashboard." : "") +
+          (usesKnown ? " The number is how many of the last " + usesDays + " days' auto-approvals each rule covers." : "") }));
+        if (!rf.length) {
+          ruleSec.appendChild(quiet(q ? "No safelist rules match." : "Empty — agy asks before every command."));
+        } else {
+          const wrap = el("div", { class: "agy-rulewrap", role: "list",
+            "aria-label": "safelist rules — each entry is a command prefix agy auto-approves" });
+          for (const r of rf) {
+            const p = parseRule(r.rule);
+            // an inert rule auto-approves nothing by definition, so a "0" beside it would
+            // read as "unused" when the truth is "never consulted" — the tag already says that
+            const showUses = usesKnown && p.kind !== "k-inert";
+            const uses = typeof r.uses === "number" ? r.uses : 0;
+            const fresh = r.promotedTs && (Date.now() - Date.parse(r.promotedTs)) < usesDays * 864e5;
+            // "this rule looks dead" is only sayable when the log actually reaches back
+            // the whole window; otherwise a young log would brand every rule unused
+            const idle = showUses && !uses && !fresh && logSpans;
+            wrap.appendChild(el("span", {
+              class: "agy-rule" + (p.kind ? " " + p.kind : "") + (r.promoted ? " promoted" : "")
+                + (idle ? " unused" : ""),
+              role: "listitem",
+              "data-rule": r.rule,
+              title: r.rule
+                + (p.kind === "k-wide" ? "\nmatches EVERY command — nothing is gated while this rule exists" : "")
+                + (p.kind === "k-inert" ? "\nnot a command(…) entry — agy's shell gate ignores it" : "")
+                + (r.promoted ? "\npromoted from this dashboard" + (r.promotedTs ? " " + tsAgoShort(Date.parse(r.promotedTs)) + " ago" : "") : "")
+                + (showUses
+                    ? "\n" + (uses
+                        // "covers", not "fired": the log records that the safelist allowed a
+                        // command, not which entry did, so overlapping rules both count it
+                        ? "covers " + uses + " of the commands the safelist auto-approved in the last " + usesDays + " days"
+                        : fresh
+                          ? "no auto-approvals recorded yet — this rule is newer than the " + usesDays + "-day window"
+                          : idle
+                            ? "no auto-approvals recorded in the last " + usesDays + " days — it may no longer be needed"
+                            : "no auto-approvals recorded — the decision log doesn't go back a full " + usesDays + " days yet")
+                    : ""),
+            }, [
+              el("span", { class: "pat", text: p.label }),
+              p.kind === "k-wide" ? el("span", { class: "tag", text: "every command" }) : null,
+              p.kind === "k-inert" ? el("span", { class: "tag", text: "not applied" }) : null,
+              showUses ? el("span", { class: "use" + (uses ? "" : " zero"), text: fresh && !uses ? "new" : String(uses) }) : null,
+              el("button", {
+                class: "x", type: "button", text: "✕",
+                title: "remove — this rule will ask for approval again",
+                "aria-label": "Remove " + r.rule + " from the safelist — this command will ask for approval again"
+                  + (r.promoted ? ". Promoted from this dashboard." : ""),
+                onclick: () => demote(r.rule),
+              }),
+            ]));
+          }
+          ruleSec.appendChild(wrap);
+        }
+      }
+
+      // ---- 2. candidates ----
+      candSec.appendChild(head("CANDIDATES — REPEATEDLY APPROVED, NOT YET SAFELISTED" + (loading ? "" : " · " + cf.length)));
+      if (!loading) {
+        if (!cf.length) candSec.appendChild(quiet(q ? "No candidates match." : "Nothing to review — approve some gated commands first."));
+        for (const c of cf) {
+          candSec.appendChild(el("div", { class: "agy-cand" }, [
+            el("div", { class: "agy-cand-top" }, [
+              el("span", { class: "lft" }, [
+                el("span", { class: "agy-atom", text: c.atom, title: c.atom }),
+                el("span", { class: "agy-cand-sub", text: c.count + "× approved" + (c.lastTs ? " · last " + tsAgoShort(c.lastTs) + " ago" : "") }),
+              ]),
+              c.alreadyAllowed
+                ? el("span", { class: "agy-cand-done", text: "already covered" })
+                : el("span", { class: "agy-approval-btns" }, [
+                    el("button", { class: "agy-ghost accent", text: "Promote", title: "adds command(" + c.atom + ") to permissions.allow — agy will then run anything starting with \"" + c.atom + "\" without asking", onclick: () => act("promote-safelist-rule", c.atom) }),
+                    el("button", { class: "agy-ghost", text: "Snooze", title: "hide this suggestion for a week — the command still asks for approval", onclick: () => act("snooze-safelist-rule", c.atom) }),
+                    el("button", { class: "agy-ghost", text: "Never", title: "never suggest this again — permanent; the command still asks for approval", onclick: () => act("reject-safelist-rule", c.atom) }),
+                  ]),
+            ]),
+            (c.examples || []).length ? el("div", { class: "agy-cand-ex", text: (c.examples || []).map((x) => "$ " + x).join("\n") }) : null,
           ]));
         }
-        ruleSec.appendChild(wrap);
       }
-      clear(candSec); clear(decSec);
-      candSec.appendChild(el("span", { class: "agy-lbl", text: "CANDIDATES — REPEATEDLY APPROVED, NOT YET SAFELISTED · " + cf.length }));
-      if (!cf.length) candSec.appendChild(el("div", { class: "agy-empty-dash", text: q ? "No candidates match." : "Nothing to review — approve some gated commands first." }));
-      for (const c of cf) {
-        candSec.appendChild(el("div", { class: "agy-cand" }, [
-          el("div", { class: "agy-cand-top" }, [
-            el("span", { class: "lft" }, [
-              el("span", { class: "agy-atom", text: c.atom }),
-              el("span", { class: "agy-cand-sub", text: c.count + "× approved" + (c.lastTs ? " · last " + tsAgoShort(c.lastTs) + " ago" : "") + (c.alreadyAllowed ? " · already safelisted" : "") }),
-            ]),
-            c.alreadyAllowed ? el("span") : el("span", { style: { display: "flex", gap: "8px", flexShrink: "0" } }, [
-              el("button", { class: "agy-btn sm", text: "Promote", title: "auto-allow this from now on (writes agy settings.json)", onclick: () => act("promote-safelist-rule", c.atom) }),
-              el("button", { class: "agy-ghost", text: "Snooze", title: "hide this suggestion for a week — the command still asks for approval", onclick: () => act("snooze-safelist-rule", c.atom) }),
-              el("button", { class: "agy-ghost", text: "Never", title: "never suggest this again — permanent; the command still asks for approval", onclick: () => act("reject-safelist-rule", c.atom) }),
-            ]),
-          ]),
-          (c.examples || []).length ? el("div", { class: "agy-cand-ex", text: (c.examples || []).map((x) => "$ " + x).join("\n") }) : null,
-        ]));
+
+      // ---- 3. decisions ----
+      decSec.appendChild(head(
+        "RECENT GATE DECISIONS · 7D" + (loading ? "" : " · " + df.length),
+        df.length > 50 ? el("span", { class: "agy-sl-sum", text: "SHOWING 50" }) : null,
+      ));
+      if (!loading) {
+        if (!df.length) {
+          decSec.appendChild(quiet(q ? "No decisions match." : "No gated commands yet."));
+        } else {
+          // built only when there are rows — the old code nested a dashed
+          // .agy-empty-dash inside this solid bordered container
+          const list = el("div", { class: "agy-cardlist" });
+          for (const d of df.slice(0, 50)) {
+            const verdict = d.decision || d.disposition || "";
+            const vc = verdict === "deny" ? "deny" : verdict === "allow" ? "allow" : "other";
+            list.appendChild(el("div", {
+              class: "agy-decrow",
+              title: (d.intent && d.intent !== "(none provided)" ? "intent: " + d.intent + "\n\n" : "") + (d.command || ""),
+            }, [
+              el("span", { class: "v " + vc, text: verdict || "?" }),
+              el("span", { class: "cmd", text: "$ " + (d.command || "") }),
+              d.reason ? el("span", { class: "why", text: d.reason }) : null,
+              // outcome, not stage: stage is "manual" for both manual-approve and manual-deny
+              el("span", { class: "meta", text: [d.outcome || d.stage, d.ts ? tsAgoShort(d.ts) : null].filter(Boolean).join(" · ") }),
+            ]));
+          }
+          decSec.appendChild(list);
+        }
       }
-      decSec.appendChild(el("span", { class: "agy-lbl", text: "RECENT GATE DECISIONS · 7D · " + df.length }));
-      const list = el("div", { class: "agy-cardlist" });
-      if (!df.length) list.appendChild(el("div", { class: "agy-empty-dash", text: q ? "No decisions match." : "No gated commands yet." }));
-      for (const d of df.slice(0, 50)) {
-        const verdict = d.decision || d.disposition || "";
-        list.appendChild(el("div", { class: "agy-decrow" }, [
-          el("span", { class: "v " + (verdict === "deny" ? "deny" : "allow"), text: verdict || "?" }),
-          el("span", { class: "cmd", text: "$ " + (d.command || "") }),
-          d.reason ? el("span", { class: "why", text: d.reason }) : null,
-          el("span", { class: "meta", text: [d.stage, d.ts ? tsAgoShort(d.ts) : null].filter(Boolean).join(" · ") }),
-        ]));
-      }
-      decSec.appendChild(list);
     }
+
     async function load() {
       let rres, cres, dres;
       try {
@@ -2978,14 +3147,31 @@ function renderAgyMonitor(tool) {
           runTool(tool.id, { action: "list-safelist-candidates" }),
           runTool(tool.id, { action: "list-decisions", days: 7 }),
         ]);
-      } catch { return; }
-      rules = (rres && rres.ok && rres.rules) || [];
-      rulesPath = (rres && rres.ok && rres.path) || "";
+      } catch {
+        // was a bare `return`, which left the page permanently blank
+        phase = "ready"; rulesOk = false;
+        errMsg = "couldn't reach the monitor backend — this is not a claim that the safelist is empty.";
+        draw(); return;
+      }
+      rulesOk = !!(rres && rres.ok);
+      rules = (rulesOk && rres.rules) || [];
+      rulesPath = (rulesOk && rres.path) || "";
+      usesKnown = !!(rulesOk && rres.usesKnown);
+      logSpans = !!(rulesOk && rres.logSpansWindow);
+      usesDays = (rulesOk && rres.windowDays) || 30;
       cands = (cres && cres.ok && cres.candidates) || [];
       decs = (dres && dres.ok && dres.decisions) || [];
+      // a dead promoter module returns {ok:false}; that used to render as
+      // "The safelist is empty — every command asks", a false safety claim
+      const fail = !rulesOk
+        ? ((rres && rres.message) || "couldn't read permissions.allow")
+        : ((cres && cres.ok === false && cres.message) || (dres && dres.ok === false && dres.message) || "");
+      errMsg = fail ? "couldn't read the safelist — " + fail : "";
+      phase = "ready";
       draw();
     }
     search.addEventListener("input", draw);
+    draw();   // paint the header + "reading settings.json…" before the first fetch
     load();
   }
 

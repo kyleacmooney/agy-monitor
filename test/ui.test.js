@@ -396,16 +396,22 @@ const SHOTS = path.join(__dirname, "shots");
   // safelist view: current allow-list from settings.json + remove
   fs.writeFileSync(process.env.AGY_GATE_SETTINGS, JSON.stringify({
     model: "Gemini 3.1 Pro (High)",
-    permissions: { allow: ["command(git log)", "command(wc)"] },
+    // the third entry is not a command(…) rule — agy's shell gate ignores it, and
+    // the view must say so rather than render it as an equal peer
+    permissions: { allow: ["command(git log)", "command(wc)", "mcp__playwright__browser_click"] },
   }));
   await page.goto(base + "/?safelist=1");
   await page.waitForSelector(".agy-htitle", { timeout: 8000 });
   fx.assert(/Safelist review/.test(await page.locator(".agy-htitle").textContent()), "safelist view mounts", failures);
   await page.waitForSelector(".agy-rule", { timeout: 8000 });
-  fx.assert(/CURRENT SAFELIST — AUTO-APPROVED · 2/.test(await page.locator(".agy-ov-sec").first().textContent()), "current safelist section with count", failures);
-  fx.assert(/command\(git log\)/.test(await page.locator(".agy-rulewrap").textContent()), "allow rules listed from settings.json", failures);
-  await page.locator(".agy-rule:has-text('command(wc)') .x").click();
-  await page.waitForFunction(() => document.querySelectorAll(".agy-rule").length === 1, null, { timeout: 8000 });
+  fx.assert(/CURRENT SAFELIST — AUTO-APPROVED · 3/.test(await page.locator("[data-sec=rules]").textContent()), "current safelist section with count", failures);
+  // assert on data-rule, not rendered text: the chip now shows the bare prefix
+  fx.assert((await page.locator('.agy-rule[data-rule="command(git log)"]').count()) === 1, "allow rules listed from settings.json", failures);
+  fx.assert((await page.locator('.agy-rule[data-rule="command(git log)"] .pat').textContent()).trim() === "git log", "chip shows the bare prefix, not command(...)", failures);
+  fx.assert((await page.locator('.agy-rule.k-inert[data-rule="mcp__playwright__browser_click"] .pat').textContent()).trim() === "mcp__playwright__browser_click", "non-command rules render verbatim", failures);
+  fx.assert(/not applied/i.test(await page.locator(".agy-rule.k-inert").textContent()), "non-command rules are marked not-applied", failures);
+  await page.locator('.agy-rule[data-rule="command(wc)"] .x').click();
+  await page.waitForFunction(() => document.querySelectorAll(".agy-rule").length === 2, null, { timeout: 8000 });
   const settingsNow = JSON.parse(fs.readFileSync(process.env.AGY_GATE_SETTINGS, "utf8"));
   fx.assert(!settingsNow.permissions.allow.includes("command(wc)"), "✕ removes the rule from settings.json", failures);
   fx.assert(settingsNow.permissions.allow.includes("command(git log)"), "other rules survive the demote", failures);

@@ -229,7 +229,17 @@ function promoteRule(atom) {
 
   const file = settingsPath();
   let settings = readJsonSafe(file);
-  if (!settings || typeof settings !== "object" || Array.isArray(settings)) settings = {};
+  // readJsonSafe returns null for BOTH "missing" and "unparseable", and rebuilding a
+  // fresh object is right for the first and catastrophic for the second: a settings.json
+  // with one hand-edit typo would be silently replaced by `{permissions:{allow:[…]}}`,
+  // dropping model, trustedWorkspaces and — the dangerous one — permissions.DENY, while
+  // still reporting ok. Only a genuinely absent file may be created from scratch.
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    if (fs.existsSync(file)) {
+      return { ok: false, message: "settings.json is not readable JSON — not overwriting it", atom: a };
+    }
+    settings = {};
+  }
   if (!settings.permissions || typeof settings.permissions !== "object") settings.permissions = {};
   if (!Array.isArray(settings.permissions.allow)) settings.permissions.allow = [];
 
@@ -261,14 +271,51 @@ function promoteRule(atom) {
 
 // The CURRENT safelist — permissions.allow as agy will actually apply it.
 // Rules promoted from here carry `promoted:true` (matched via the audit trail).
+//
+// Each rule also carries `uses`: how many of the window's safelist auto-approvals that
+// rule COVERS. Note "covers", not "fired" — the log records that the safelist allowed a
+// command, never which entry satisfied it, so when two rules overlap (command(git) and
+// command(git log)) both are credited. Over-crediting is the honest direction: it can
+// make a redundant rule look earned, but it can never make a load-bearing rule look dead.
+// Matching uses policy.atomMatchesAllow — the gate's own matcher, not a copy of it.
+//
+// Two flags bound what the UI may claim from this:
+//   usesKnown      — the log holds at least one safelist-allow row. Otherwise every count
+//                    is 0 for want of data (no gate hook, fresh install), not for want of use.
+//   logSpansWindow — the log actually reaches back the full window. A log that started
+//                    yesterday cannot support "no auto-approvals in 30 days"; without this
+//                    a single row would brand every other rule dead.
 function listRules() {
   const allow = loadAllow();
   const state = readState();
-  const promoted = new Set((Array.isArray(state.promotions) ? state.promotions : []).map((p) => p.rule));
+  const promos = new Map();
+  for (const p of (Array.isArray(state.promotions) ? state.promotions : [])) {
+    if (p && p.rule) promos.set(p.rule, p.ts || null);   // last promotion of a rule wins
+  }
+  const days = windowDays();
+  const rows = readDecisions(days);
+  // same bound listDecisions applies — the decision log is append-only and unpruned,
+  // so an uncapped scan here is rows x rules work on the server's event loop
+  const fired = rows.filter((r) => r && r.outcome === "safelist-allow").slice(0, MAX_DECISIONS);
+  // readDecisions is newest-first, so the last row is the oldest we hold
+  const oldest = rows.length ? Date.parse(rows[rows.length - 1].ts) : NaN;
+  const spans = !Number.isNaN(oldest) && (Date.now() - oldest) >= (days - 1) * DAY_MS;
   return {
     ok: true,
     path: settingsPath(),
-    rules: allow.map((r) => ({ rule: String(r), promoted: promoted.has(r) })),
+    windowDays: days,
+    usesKnown: fired.length > 0,
+    logSpansWindow: spans,
+    rules: allow.map((r) => {
+      const rule = String(r);
+      const one = [rule];
+      let uses = 0;
+      for (const d of fired) {
+        const atoms = Array.isArray(d.atoms) ? d.atoms : [];
+        if (atoms.some((a) => typeof a === "string" && a && policy.atomMatchesAllow(a, one))) uses++;
+      }
+      return { rule, promoted: promos.has(rule), promotedTs: promos.get(rule) || null, uses };
+    }),
   };
 }
 
@@ -291,6 +338,65 @@ function demoteRule(rule) {
   const state = readState();
   if (!Array.isArray(state.demotions)) state.demotions = [];
   state.demotions.push({ rule: r, backup: backup || null, ts: new Date().toISOString() });
+  writeState(state);
+  return { ok: true, rule: r, backup: backup || null };
+}
+
+// Undo a demote: put a rule the user just removed back, VERBATIM.
+//
+// Deliberately does NOT run vetoReason(). That veto exists to stop promoteRule from
+// CREATING a dangerous new rule out of an observed atom — but this rule was already
+// in the user's own file a moment ago, and re-screening would refuse to restore the
+// single-token rules (command(wc), command(ls)) that make up most real safelists.
+// Restoring is returning the file to a state the user already had, not granting
+// anything new; the only writer of the string is the file itself.
+function restoreRule(rule) {
+  const r = String(rule == null ? "" : rule).trim();
+  if (!r) return { ok: false, message: "empty rule" };
+  // Only undo what we recorded removing. Skipping the veto is only defensible for a
+  // string this tool took OUT of the file; without this check the action would be an
+  // unvetted "append anything to permissions.allow" primitive, and restoring would be
+  // the way around a veto that refuses command(*) and bare single binaries outright.
+  const state = readState();
+  if (!(Array.isArray(state.demotions) && state.demotions.some((d) => d && d.rule === r))) {
+    return { ok: false, message: "nothing to restore — that rule was not removed from this dashboard", rule: r };
+  }
+  // Belt-and-braces: command(*) disables the gate for every command. Helping a user put
+  // that back is not an undo worth offering, whatever the ledger says.
+  const pat = /^command\((.+)\)$/.exec(r);
+  if (pat && pat[1].trim() === "*") {
+    return { ok: false, message: "refusing to restore command(*) — it would auto-approve every command", rule: r };
+  }
+  const file = settingsPath();
+  let settings = readJsonSafe(file);
+  // readJsonSafe returns null for BOTH "missing" and "unparseable". Rebuilding a fresh
+  // object is right for the first and catastrophic for the second: it would drop every
+  // other key in the user's agy settings — model, trustedWorkspaces, permissions.DENY —
+  // and report ok. Only a genuinely absent file may be created from scratch.
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    if (fs.existsSync(file)) {
+      return { ok: false, message: "settings.json is not readable JSON — not overwriting it", rule: r };
+    }
+    settings = {};
+  }
+  if (!settings.permissions || typeof settings.permissions !== "object") settings.permissions = {};
+  if (!Array.isArray(settings.permissions.allow)) settings.permissions.allow = [];
+  if (settings.permissions.allow.includes(r)) {
+    return { ok: true, rule: r, alreadyAllowed: true, message: "already in the safelist" };
+  }
+  const backup = backupSettings(file);
+  settings.permissions.allow.push(r);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+  } catch (e) {
+    return { ok: false, message: "failed to write settings: " + (e && e.message ? e.message : String(e)), rule: r };
+  }
+  // Consume the ledger entry: one removal buys exactly one undo, so a single old
+  // demotion can't be replayed into repeated grants later.
+  state.demotions = state.demotions.filter((d) => !(d && d.rule === r));
+  if (!Array.isArray(state.restorations)) state.restorations = [];
+  state.restorations.push({ rule: r, backup: backup || null, ts: new Date().toISOString() });
   writeState(state);
   return { ok: true, rule: r, backup: backup || null };
 }
@@ -324,6 +430,7 @@ module.exports = {
   listRules,
   promoteRule,
   demoteRule,
+  restoreRule,
   snoozeRule,
   rejectRule,
   // exported for tests / reuse

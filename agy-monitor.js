@@ -2068,6 +2068,7 @@ const agyMonitor = {
     // ---- safety-gate learning loop (agy-promoter.js; decisions logged by agy-gate.js)
     if (action === "list-decisions" || action === "list-safelist-candidates" ||
         action === "list-safelist-rules" || action === "demote-safelist-rule" ||
+        action === "restore-safelist-rule" ||
         action === "promote-safelist-rule" || action === "snooze-safelist-rule" ||
         action === "reject-safelist-rule") {
       let promoter;
@@ -2076,6 +2077,7 @@ const agyMonitor = {
       if (action === "list-safelist-candidates") return promoter.listCandidates();
       if (action === "list-safelist-rules") return promoter.listRules();
       if (action === "demote-safelist-rule") return promoter.demoteRule(input && input.rule);
+      if (action === "restore-safelist-rule") return promoter.restoreRule(input && input.rule);
       if (action === "promote-safelist-rule") return promoter.promoteRule(input && input.atom);
       if (action === "snooze-safelist-rule") return promoter.snoozeRule(input && input.atom);
       if (action === "reject-safelist-rule") return promoter.rejectRule(input && input.atom);
