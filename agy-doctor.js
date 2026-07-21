@@ -192,9 +192,14 @@ function checkExternals() {
   const codex = process.env.AGY_CODEX_ROOT || path.join(os.homedir(), ".codex", "sessions");
   const copilot = process.env.AGY_COPILOT_ROOT ||
     path.join(os.homedir(), "Library", "Application Support", "Code", "User", "workspaceStorage");
-  const found = [fs.existsSync(codex) && "codex", fs.existsSync(copilot) && "copilot"].filter(Boolean);
+  const claude = process.env.AGY_CLAUDE_ROOT || path.join(os.homedir(), ".claude", "projects");
+  const found = [
+    fs.existsSync(codex) && "codex",
+    fs.existsSync(copilot) && "copilot",
+    fs.existsSync(claude) && "claude code",
+  ].filter(Boolean);
   return { id: "externals", label: "other agents", status: "info",
-    detail: found.length ? `read-only sessions found: ${found.join(", ")}` : "none detected (codex/copilot) — the OTHER AGENTS section stays hidden" };
+    detail: found.length ? `read-only sessions found: ${found.join(", ")}` : "none detected (codex/copilot/claude code) — the OTHER AGENTS section stays hidden" };
 }
 
 function checkConfigFile() {

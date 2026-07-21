@@ -3485,11 +3485,22 @@ function renderAgyMonitor(tool) {
       if (S.view.kind !== "external" || S.view.id !== id) return; // superseded
       if (!res || !res.ok) { feed.appendChild(el("div", { class: "agy-empty-dash", text: (res && res.message) || "couldn't read that session" })); return; }
       const msgs = res.messages || [];
-      // header: real project + first-user-message title
+      // header: real project, and the agent's own title for the session when it has
+      // one (Claude Code records an ai-title) — otherwise the opening message
       const firstUser = msgs.find((m) => m.role === "user");
       S.view.extProject = res.project || null;
-      S.view.extTitle = firstUser ? firstUser.text.replace(/\s+/g, " ").slice(0, 80) : null;
+      S.view.extTitle = res.title
+        ? String(res.title).replace(/\s+/g, " ").slice(0, 80)
+        : firstUser ? firstUser.text.replace(/\s+/g, " ").slice(0, 80) : null;
       renderHeader();
+      // Long transcripts are read from the END (see tailText), so say so rather than
+      // let a session that opens mid-sentence look like the whole conversation.
+      if (res.truncated) {
+        feed.appendChild(el("div", { class: "agy-ext-trunc" }, [
+          el("span", { class: "g", text: "⋯" }),
+          el("span", { text: "This session is too large to show in full — earlier messages are omitted. You're seeing the most recent part." }),
+        ]));
+      }
       if (!msgs.length) feed.appendChild(el("div", { class: "agy-ws-empty", text: "No messages in this session." }));
       msgs.forEach((m, i) => feed.appendChild(messageEl(m, i, { openFile, roleLabel: res.agent })));
 

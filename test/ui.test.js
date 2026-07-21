@@ -66,6 +66,7 @@ const SHOTS = path.join(__dirname, "shots");
   const agyStub = fx.writeAgyStub(roots.base, roots.agyHome);
   process.env.AGY_GATE_AGY_BIN = agyStub; // the doctor's agy check must see the stub, not the host machine
   process.env.AGY_CODEX_ROOT = fx.writeCodexSession(roots.base).root;
+  process.env.AGY_CLAUDE_ROOT = fx.writeClaudeSession(roots.base).root;
 
   // a real git workspace so the DIFF panel + @-file menu have content
   const ws = path.join(roots.base, "ws");
@@ -370,8 +371,10 @@ const SHOTS = path.join(__dirname, "shots");
   // external agents: sidebar section → read-only transcript → fork-to-agy bar
   await page.waitForSelector(".agy-ext-row", { timeout: 12000 });
   fx.assert(/OTHER AGENTS/.test(await page.locator(".agy-ext-sec").textContent()), "sidebar OTHER AGENTS section", failures);
-  fx.assert(/CODEX/.test(await page.locator(".agy-ext-tag").first().textContent()), "codex tag chip on the row", failures);
-  await page.click(".agy-ext-row");
+  // several agents share this section, so every assertion targets ITS row rather than
+  // whichever happens to be most recent
+  fx.assert(await page.locator(".agy-ext-tag:has-text('CODEX')").count() === 1, "codex tag chip on the row", failures);
+  await page.click(".agy-ext-row:has(.agy-ext-tag:has-text('CODEX'))");
   await page.waitForSelector(".agy-extbar", { timeout: 8000 });
   fx.assert(/CODEX · READ-ONLY/.test(await page.locator(".agy-extbar .tag").textContent()), "read-only bar replaces the composer", failures);
   fx.assert(await page.locator(".agy-ta").count() === 0, "no composer on an external transcript", failures);
@@ -380,6 +383,25 @@ const SHOTS = path.join(__dirname, "shots");
   fx.assert(/read-only/.test(await page.locator(".agy-chip").textContent()), "header chip says read-only", failures);
   fx.assert(await page.locator(".agy-extbar-fork").count() === 1, "⑂ fork to agy action present", failures);
   await page.screenshot({ path: path.join(SHOTS, "external.png") });
+
+  // claude code sessions sit alongside codex, and render their tool calls
+  fx.assert(await page.locator(".agy-ext-tag:has-text('CLAUDE')").count() === 1, "claude code row in OTHER AGENTS", failures);
+  // the reserve keeps codex visible even though the claude fixture is newer
+  fx.assert(await page.locator(".agy-ext-tag:has-text('CODEX')").count() === 1, "codex is not crowded out by the newer claude session", failures);
+  await page.click(".agy-ext-row:has(.agy-ext-tag:has-text('CLAUDE'))");
+  await page.waitForSelector(".agy-extbar", { timeout: 8000 });
+  fx.assert(/CLAUDE · READ-ONLY/.test(await page.locator(".agy-extbar .tag").textContent()), "claude read-only bar", failures);
+  fx.assert(/export endpoint/i.test(await page.locator(".agy-msg-user").first().textContent()), "claude user turn rendered", failures);
+  // the mid-turn message exists only as an attachment — the transcript is wrong without it
+  fx.assert(/csv variant/.test(await page.locator(".agy-feed").textContent()), "queued mid-turn message rendered", failures);
+  fx.assert(!/task-notification/.test(await page.locator(".agy-feed").textContent()), "machine turns stay out of the transcript", failures);
+  const toolCard = page.locator(".agy-tool").first();
+  fx.assert(await page.locator(".agy-tool").count() >= 1, "claude tool calls render as tool cards", failures);
+  fx.assert(/Bash/.test(await toolCard.textContent()), "tool card names the tool", failures);
+  await toolCard.click(); // expand to reveal the command + captured output
+  fx.assert(/rg -n export/.test(await toolCard.textContent()), "tool card shows the command", failures);
+  fx.assert(/app\.get/.test(await toolCard.textContent()), "tool card shows the tool's output", failures);
+  await page.screenshot({ path: path.join(SHOTS, "external-claude.png") });
 
   // new chat: options card (LAUNCH/MODEL/PERMISSIONS/SAFETY) + adaptive button
   await page.goto(base + "/?new=");

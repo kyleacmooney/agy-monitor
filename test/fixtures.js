@@ -103,6 +103,63 @@ function writeCodexSession(base, { workspace = "/tmp/codex-ws", title = "fix the
   return { root, file };
 }
 
+// A fake Claude Code session under <base>/claude-projects — point AGY_CLAUDE_ROOT
+// here for hermetic list-external/get-external tests. Deliberately includes the
+// awkward parts of the real format: one content block per assistant record, a tool
+// result arriving as a `user` record, a machine-generated `user` turn, a queued
+// mid-turn human message, and a subagent transcript nested one level deeper.
+function writeClaudeSession(base, {
+  workspace = "/tmp/claude-ws",
+  title = "wire up the export endpoint",
+  aiTitle = "Export endpoint wiring",
+  sid = "11111111-2222-3333-4444-555555555555",
+} = {}) {
+  const root = path.join(base, "claude-projects");
+  const dir = path.join(root, "-tmp-claude-ws");
+  fs.mkdirSync(dir, { recursive: true });
+  const common = { cwd: workspace, sessionId: sid, gitBranch: "main", isSidechain: false, userType: "external" };
+  const rows = [
+    { type: "mode", mode: "normal", sessionId: sid },
+    { type: "user", ...common, timestamp: "2026-07-01T10:00:00Z", origin: { kind: "human" }, promptSource: "typed",
+      message: { role: "user", content: title } },
+    { type: "ai-title", aiTitle, sessionId: sid },
+    // one block per assistant record — these three must merge into ONE turn
+    { type: "assistant", ...common, timestamp: "2026-07-01T10:00:02Z",
+      message: { role: "assistant", content: [{ type: "thinking", thinking: "look at the router first", signature: "sig" }] } },
+    { type: "assistant", ...common, timestamp: "2026-07-01T10:00:03Z",
+      message: { role: "assistant", content: [{ type: "text", text: "Let me look at the router." }] } },
+    { type: "assistant", ...common, timestamp: "2026-07-01T10:00:04Z",
+      message: { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "Bash", input: { command: "rg -n export server.js", description: "Find the export route" } }] } },
+    // a tool result comes back as a `user` record — never its own message
+    { type: "user", ...common, timestamp: "2026-07-01T10:00:05Z", toolUseResult: { stdout: "42: app.get('/export')", stderr: "", interrupted: false },
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tu_1", content: "42: app.get('/export')" }] } },
+    // machine-generated `user` turn: must not appear as something the human said
+    { type: "user", ...common, timestamp: "2026-07-01T10:00:06Z", origin: { kind: "task-notification" },
+      message: { role: "user", content: "<task-notification>\n<task-id>abc</task-id>\n</task-notification>" } },
+    // text after tool calls opens the next beat
+    { type: "assistant", ...common, timestamp: "2026-07-01T10:00:07Z",
+      message: { role: "assistant", content: [{ type: "text", text: "Found it on line 42." }] } },
+    // typed while the agent was working: only ever recorded as an attachment
+    { type: "attachment", ...common, timestamp: "2026-07-01T10:00:08Z",
+      attachment: { type: "queued_command", prompt: "also add the csv variant", commandMode: "prompt" } },
+    // background-task completion is queued the SAME way — must stay filtered
+    { type: "attachment", ...common, timestamp: "2026-07-01T10:00:09Z",
+      attachment: { type: "queued_command", prompt: "<task-notification>\n<task-id>zzz</task-id>\n</task-notification>" } },
+    { type: "assistant", ...common, timestamp: "2026-07-01T10:00:10Z",
+      message: { role: "assistant", content: [{ type: "text", text: "Adding the csv variant now." }] } },
+  ];
+  const file = path.join(dir, sid + ".jsonl");
+  fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  // a subagent transcript, which must NOT be listed as a session of its own
+  const subDir = path.join(dir, sid, "subagents");
+  fs.mkdirSync(subDir, { recursive: true });
+  fs.writeFileSync(path.join(subDir, "agent-deadbeef.jsonl"), JSON.stringify({
+    type: "user", ...common, timestamp: "2026-07-01T10:00:11Z", origin: { kind: "human" },
+    message: { role: "user", content: "subagent prompt that must never be listed" },
+  }) + "\n");
+  return { root, file, dir, sid };
+}
+
 // A minimal stdio MCP server (newline JSON-RPC): answers initialize + tools/list.
 function writeMcpStub(dir) {
   const stub = path.join(dir, "mcp-stub.js");
@@ -138,4 +195,4 @@ function finish(failures, name) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-module.exports = { CID, makeRoots, writeConversation, writeHistoryLine, writeAgyStub, writeCodexSession, writeMcpStub, assert, finish, sleep };
+module.exports = { CID, makeRoots, writeConversation, writeHistoryLine, writeAgyStub, writeCodexSession, writeClaudeSession, writeMcpStub, assert, finish, sleep };

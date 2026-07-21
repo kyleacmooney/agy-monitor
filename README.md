@@ -17,7 +17,7 @@ A local web console for Google's [Antigravity CLI](https://antigravity.google) (
 - **Cost estimates** — per-conversation list-price estimates plus a global spend rollup, decoded dependency-free from `agy`'s own token-usage metadata.
 - **Repeated prompts fold** — a script that drives `agy -p` on a loop (a commit-message helper, a judge, a health probe) would otherwise bury every hand-written chat. Conversations that open with the same prompt collapse into one group you can expand. Nothing is hidden from the counts, from search, or from the spend rollup — see `AGY_NOISE_MIN_CLUSTER`.
 - **Workspace diffs** and an **MCP panel** that enumerates and probes the MCP servers `agy` can actually load.
-- **Other agents, read-only** — surfaces local [Codex CLI](https://github.com/openai/codex) and VS Code Copilot chat sessions alongside your `agy` ones.
+- **Other agents, read-only** — surfaces local [Codex CLI](https://github.com/openai/codex), VS Code Copilot, and [Claude Code](https://claude.com/claude-code) chat sessions alongside your `agy` ones. Claude Code transcripts include tool calls and their output; each agent keeps reserved slots in the list, so the one you used most recently can't crowd out the others.
 - **Fan-out** — run N parallel `agy` workers on one task, each in its own git worktree, then let a Claude judge rank or merge the results.
 - **One-shot Opus review** — a single Claude Opus pass over a workspace's working-tree diff, returning structured, dismissable findings.
 
@@ -155,6 +155,7 @@ Every setting is an environment variable. You can also drop them in `~/.agy-moni
 |---|---|---|
 | `AGY_CODEX_ROOT` | `~/.codex/sessions` | Codex CLI session root. |
 | `AGY_COPILOT_ROOT` | VS Code `workspaceStorage` | Copilot chat session root. |
+| `AGY_CLAUDE_ROOT` | `~/.claude/projects` | Claude Code session root. |
 
 ## Remote access
 

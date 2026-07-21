@@ -231,6 +231,13 @@ summary { list-style: none; }
 }
 .agy-ext-row .t { flex: 1; min-width: 0; font-size: 12px; color: var(--body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agy-ext-row .ago { font: 400 10px var(--mono); color: var(--dis); flex-shrink: 0; }
+/* a transcript read from the end says so at the top, so it can't be mistaken for all of it */
+.agy-ext-trunc {
+  display: flex; align-items: baseline; gap: 8px; margin: 0 0 14px;
+  border: 1px dashed var(--hair12); border-radius: 6px; padding: 9px 12px;
+  font-size: 11.5px; color: var(--faint);
+}
+.agy-ext-trunc .g { font: 400 13px var(--mono); color: var(--dis); flex-shrink: 0; }
 
 /* sidebar footer — spend */
 .agy-side-foot { border-top: 1px solid var(--hair07); padding: 10px 16px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; overflow: hidden; }

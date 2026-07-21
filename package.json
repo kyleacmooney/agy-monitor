@@ -9,8 +9,8 @@
   "scripts": {
     "start": "node server.js",
     "doctor": "node bin/doctor.js",
-    "test": "node agy-parse-test.js && node agy-policy-test.js && node agy-gate-test.js && node agy-promoter-test.js && node state.test.js && node clilog.test.js && node classify-args.test.js && node noise-cluster.test.js && node test/doctor.test.js && node test/sigv4.test.js && node test/fanout-review.test.js && node test/server.test.js && node test/runs.test.js && node test/sse.test.js && node test/self-update.test.js && node test/ui.test.js",
-    "test:unit": "node agy-parse-test.js && node agy-policy-test.js && node agy-gate-test.js && node agy-promoter-test.js && node state.test.js && node clilog.test.js && node classify-args.test.js && node noise-cluster.test.js && node test/doctor.test.js && node test/sigv4.test.js"
+    "test": "node agy-parse-test.js && node agy-policy-test.js && node agy-gate-test.js && node agy-promoter-test.js && node state.test.js && node clilog.test.js && node classify-args.test.js && node noise-cluster.test.js && node external.test.js && node test/doctor.test.js && node test/sigv4.test.js && node test/fanout-review.test.js && node test/server.test.js && node test/runs.test.js && node test/sse.test.js && node test/self-update.test.js && node test/ui.test.js",
+    "test:unit": "node agy-parse-test.js && node agy-policy-test.js && node agy-gate-test.js && node agy-promoter-test.js && node state.test.js && node clilog.test.js && node classify-args.test.js && node noise-cluster.test.js && node external.test.js && node test/doctor.test.js && node test/sigv4.test.js"
   },
   "devDependencies": {
     "playwright": "^1.49.0"
