@@ -41,5 +41,14 @@ if [ -n "$AGY_MONITOR_GATED" ] && [ "$EVENT" = "PreToolUse" ]; then
 fi
 
 # Ungated sessions (your real terminals) are pure observe-only: always allow, never gate.
-echo '{"decision":"allow"}'
+#
+# Only PreToolUse has a "decision" field. agy parses every hook's stdout as a
+# per-event proto, so printing {"decision":"allow"} on PreInvocation/PostToolUse/
+# PostInvocation/Stop makes it log `unknown field "decision"` on every single tool
+# call. An empty object is the no-opinion reply for those.
+if [ "$EVENT" = "PreToolUse" ]; then
+  echo '{"decision":"allow"}'
+else
+  echo '{}'
+fi
 exit 0

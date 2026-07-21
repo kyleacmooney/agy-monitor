@@ -336,9 +336,18 @@ async function main() {
     assert.deepStrictEqual(JSON.parse(runHook("PreToolUse", { HOME: d, AGY_MONITOR_GATED: "1" }, denyPayload, d)),
       { decision: "deny", reason: "agy-monitor gate unavailable" });
   });
-  await test("GATED non-PreToolUse event → allow (only PreToolUse is gated)", () => {
+  // Only PreToolUse is gated — and only PreToolUse HAS a "decision" field. agy parses
+  // each hook's stdout as that event's proto, so replying {"decision":"allow"} to a
+  // Stop/PostToolUse/PreInvocation makes it log `unknown field "decision"` every time.
+  await test("GATED non-PreToolUse event → ungated no-opinion {} (never a decision)", () => {
     const d = mkHookDir(null);
-    assert.deepStrictEqual(JSON.parse(runHook("Stop", { HOME: d, AGY_MONITOR_GATED: "1" }, denyPayload, d)), { decision: "allow" });
+    assert.deepStrictEqual(JSON.parse(runHook("Stop", { HOME: d, AGY_MONITOR_GATED: "1" }, denyPayload, d)), {});
+  });
+  await test("UNGATED non-PreToolUse event → {} too", () => {
+    const d = mkHookDir(null);
+    for (const ev of ["Stop", "PostToolUse", "PreInvocation", "PostInvocation", "Notification"]) {
+      assert.deepStrictEqual(JSON.parse(runHook(ev, { HOME: d }, denyPayload, d)), {}, ev);
+    }
   });
   await test("GATED PreToolUse passes the gate's decision through unchanged", () => {
     const d = mkHookDir(`console.log(JSON.stringify({ decision: "deny", reason: "stub gate" }));`);
