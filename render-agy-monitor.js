@@ -1425,10 +1425,17 @@ function renderAgyMonitor(tool) {
     // A result-less tool on a session that's "waiting" (not busy) is parked on the
     // terminal's approval prompt, not executing — say so instead of "running…".
     const awaiting = running && opts && opts.awaiting;
+    // …and one whose approval prompt the user escaped/denied never ran at all. It has
+    // no result and the session is idle, so without this it would draw the plain green
+    // ✓ and silently claim the cancelled command succeeded. `opts.cancelled` is the
+    // TOOL NAME the server proved was cancelled, not a flag: a turn can end on several
+    // result-less cards and only that one was refused.
+    const cancelled = !res && !running && opts && opts.cancelled && !opts.compact
+      && (!tc.name || tc.name === opts.cancelled);
     const kids = [];
-    const glyph = el("span", { class: "glyph" + (awaiting ? " await" : running ? " live" : ""), text: awaiting ? "◌" : running ? "●" : "✓" });
+    const glyph = el("span", { class: "glyph" + (awaiting ? " await" : running ? " live" : cancelled ? " cancelled" : ""), text: awaiting ? "◌" : running ? "●" : cancelled ? "⊘" : "✓" });
     const statText = res && res.kind === "command" && res.status ? firstLine(res.status)
-      : awaiting ? "awaiting approval…" : running ? "running…" : "";
+      : awaiting ? "awaiting approval…" : running ? "running…" : cancelled ? "cancelled" : "";
     kids.push(el("summary", {}, [
       glyph,
       el("span", { class: "tname", text: tc.name || "tool" }),
@@ -1677,7 +1684,7 @@ function renderAgyMonitor(tool) {
       (m.toolCalls || []).forEach((tc, j) => {
         const key = "tool:" + i + ":" + j;
         if (tc.name === "write_to_file" && tc.content != null) kids.push(diffCard(tc, { key, compact: opts.compact }));
-        else kids.push(toolCard(tc, { key, openFile, maybeRunning: opts.isLast && opts.live, awaiting: opts.isLast && opts.awaiting, compact: opts.compact }));
+        else kids.push(toolCard(tc, { key, openFile, maybeRunning: opts.isLast && opts.live, awaiting: opts.isLast && opts.awaiting, cancelled: opts.isLast && opts.cancelled, compact: opts.compact }));
       });
       return el("div", { class: "agy-turn" }, [el("div", { class: "agy-msg-agy" }, kids)]);
     }
@@ -2279,14 +2286,17 @@ function renderAgyMonitor(tool) {
 
       const s = liveSess();
       const awaiting = !!(s && s.state === "waiting");
+      // agy's own log proved this tool call was escaped/denied — it never ran. Keep the
+      // NAME: only the matching card should be marked, not every result-less one.
+      const cancelled = (s && s.cancelledTool) || null;
       const live = !!(s && (s.state === "busy" || s.state === "waiting")) || D.runs.some((r) => r.conversationId === full.conversationId && r.status === "running");
       const msgs = annotateAsks(mergeTranscript(res.messages || []));
       const nearBottom = viewEl.scrollHeight - viewEl.scrollTop - viewEl.clientHeight < 80;
       if (pendingEl) { try { viewEl.removeChild(pendingEl); } catch {} pendingEl = null; }
       let changed = false;
       for (let i = 0; i < msgs.length; i++) {
-        const sig = msgSig(msgs[i]) + askSig(msgs[i]) + (i === msgs.length - 1 && live ? (awaiting ? ":await" : ":live") : "");
-        const opts = { openFile, isLast: i === msgs.length - 1, live, awaiting, cid: full.conversationId, sendAnswer, forkFrom: (ts) => forkNow(ts) };
+        const sig = msgSig(msgs[i]) + askSig(msgs[i]) + (i === msgs.length - 1 ? (live ? (awaiting ? ":await" : ":live") : cancelled ? ":cancel" : "") : "");
+        const opts = { openFile, isLast: i === msgs.length - 1, live, awaiting, cancelled, cid: full.conversationId, sendAnswer, forkFrom: (ts) => forkNow(ts) };
         if (i >= rows.length) {
           const fresh = messageEl(msgs[i], i, opts);
           feed.appendChild(fresh); rows.push({ sig, el: fresh }); changed = true;

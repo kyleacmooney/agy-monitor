@@ -28,6 +28,7 @@ const os = require("os");
 const path = require("path");
 const { StringDecoder } = require("string_decoder"); // chunked transcript reads must not split a multi-byte char
 const agyPolicy = require("./agy-policy"); // classify a run_command → does agy prompt on it?
+const agyCliLog = require("./agy-clilog"); // agy's own process log — ground truth on approval prompts
 
 // AGY_MONITOR_ROOT / AGY_CLI_HOME let the server tests point everything at
 // fixture dirs (same convention agy-gate.js already uses).
@@ -1683,29 +1684,69 @@ function deriveState(event, payload) {
 // A "busy" whose last event is older than BUSY_STALE_MS usually means its Stop was
 // missed/overwritten, so we downgrade to idle ("your turn"). The EXCEPTION is a
 // dangling PreToolUse (a tool that never got its PostToolUse): that isn't a missed
-// Stop — agy is parked AT the tool. Without --dangerously-skip-permissions that means
-// it's blocked on the terminal's approval prompt (needs you); with skip-perms the tool
-// is just running long. Either way the turn has NOT ended, so never call it "your turn".
+// Stop — agy is parked AT the tool, either on its approval prompt or running it.
+//
+// A dangling PreToolUse is genuinely ambiguous from the hooks alone, because agy has
+// no interrupt event: pressing Escape at the approval prompt cancels the turn context,
+// agy then runs the Stop hook with that cancelled context, and our hook is killed
+// before it can write — so the status file freezes on PreToolUse and looked, forever,
+// like "needs you". `live.cli` resolves the ambiguity from agy's OWN log (see
+// agy-clilog.js) and OVERRIDES every heuristic below; when it is absent (log
+// unreadable) the old policy + staleness inference is used unchanged.
 // `now` is injectable for tests.
 function displayLiveState(live, skipPerms, now) {
   if (!live) return { state: "running", stateDetail: null, tool: null };
-  let state = live.state, stateDetail = live.detail, tool = live.tool || null;
+  const state = live.state, tool = live.tool || null;
   const nowMs = now == null ? Date.now() : now;
-  // Policy-aware fast path: a dangling PreToolUse for a run_command agy prompts on
-  // means it's blocked on the terminal's approval prompt RIGHT NOW — no need to wait
-  // out BUSY_STALE_MS to say "awaiting approval". Only with a real prompt (no skip-perms).
-  if (state === "busy" && !skipPerms && live.event === "PreToolUse" && live.forcesApproval) {
-    return { state: "waiting", stateDetail: `awaiting approval: ${live.tool || "run_command"}`, tool: live.tool || null };
-  }
-  if (state === "busy" && nowMs - live.ts * 1000 > BUSY_STALE_MS) {
-    if (live.event === "PreToolUse" && live.tool) {
-      if (skipPerms) stateDetail = `still running ${live.tool}`;
-      else { state = "waiting"; stateDetail = `awaiting approval: ${live.tool}`; }
-    } else {
-      state = "idle"; stateDetail = "your turn"; tool = null;
+  const stale = state === "busy" && nowMs - live.ts * 1000 > BUSY_STALE_MS;
+
+  if (state === "busy" && live.event === "PreToolUse") {
+    const cli = live.cli || null;
+    if (cli) {
+      // Order matters: whether the prompt was ANSWERED settles the state, and only a
+      // still-unanswered prompt means "needs you". A surfaced-then-approved step is
+      // executing, not waiting.
+      //
+      // NB: `cli.tool` is agy's INTERNAL display name for the tool ("Bash", "ReadFile",
+      // "McpTool"), which is a different namespace from the transcript's API name that
+      // `tool` (payload.toolCall.name) and every tool card carry ("run_command",
+      // "read_file", "call_mcp_tool"). The two never compare equal, so only `tool` may
+      // leave this function — the UI matches cancelledTool against a card's tc.name, and
+      // handing it "Bash" would silently never mark anything. The log tells us WHETHER
+      // the step was cancelled; the hook payload tells us WHICH tool that step was.
+      //
+      // agy answered the prompt with "no" (denied, or Escape) — the turn is over.
+      if (cli.approved === false) return { state: "idle", stateDetail: "your turn — tool cancelled", tool: null, cancelledTool: tool };
+      // agy ended the turn but its Stop hook was killed with the cancelled context.
+      if (cli.turnEnded) return { state: "idle", stateDetail: "your turn", tool: null, cancelledTool: tool };
+      // Approved (or never prompted at all): really running, never "needs you".
+      if (cli.approved === true || cli.surfaced === false) {
+        return { state: "busy", stateDetail: stale && tool ? `still running ${tool}` : live.detail, tool };
+      }
+      // agy is showing its approval prompt right now — this is ground truth, so it
+      // beats forcesApproval (which is only a guess at agy's own prompting policy).
+      // cli.tool is only a display fallback here, for the case where the hook payload
+      // carried no tool name at all; `tool` wins so the label matches the tool cards.
+      if (cli.surfaced === true) return { state: "waiting", stateDetail: `awaiting approval: ${tool || cli.tool || "tool"}`, tool };
+      // cli present but silent about this step → fall through to the heuristics.
     }
+    // No log evidence: a run_command agy is expected to prompt on is treated as parked
+    // at the prompt immediately, without waiting out BUSY_STALE_MS.
+    if (!skipPerms && live.forcesApproval) {
+      return { state: "waiting", stateDetail: `awaiting approval: ${live.tool || "run_command"}`, tool: live.tool || null };
+    }
+    if (stale && live.tool) {
+      if (skipPerms) return { state: "busy", stateDetail: `still running ${live.tool}`, tool };
+      return { state: "waiting", stateDetail: `awaiting approval: ${live.tool}`, tool };
+    }
+    // A stale PreToolUse with no tool NAME tells us nothing to be parked on, so it is
+    // treated like any other stale busy: its Stop was missed and the turn is over.
+    if (stale) return { state: "idle", stateDetail: "your turn", tool: null };
+    return { state, stateDetail: live.detail, tool };
   }
-  return { state, stateDetail, tool };
+
+  if (stale) return { state: "idle", stateDetail: "your turn", tool: null };
+  return { state, stateDetail: live.detail, tool };
 }
 
 // Hook status files (GC'ing stale ones), indexed by conversationId (primary) and
@@ -1731,6 +1772,9 @@ function readStatuses() {
       workspace: ws,
       ts: rec.ts,
       transcriptPath: rec.payload && rec.payload.transcriptPath,
+      // agy's step counter for this event — the join key against its own cli log,
+      // which is the only place an interrupted approval prompt is recorded.
+      stepIdx: rec.payload && typeof rec.payload.stepIdx === "number" ? rec.payload.stepIdx : null,
       ...deriveState(rec.event, rec.payload),
       event: rec.event,
     };
@@ -1778,7 +1822,7 @@ async function listAgySessions() {
       // The active conversation is the one the process actually has open — reliable
       // even when the hook isn't firing and regardless of the (lagging) cache.
       const fn = await execFileP("lsof", ["-nP", "-p", String(c.pid), "-Ffn"]);
-      let workspace = "", curFd = "";
+      let workspace = "", curFd = "", cliLogPath = null;
       const brainCids = new Set();
       for (const l of fn.split("\n")) {
         if (l[0] === "f") curFd = l.slice(1);
@@ -1787,6 +1831,9 @@ async function listAgySessions() {
           if (curFd === "cwd" && !workspace) workspace = name;
           const m = name.match(/\/brain\/([0-9a-fA-F][0-9a-fA-F-]{34,})(?:\/|$)/);
           if (m) brainCids.add(m[1]);
+          // agy redirects its own stdout/stderr into a per-process cli log; it is the
+          // only record of an approval prompt the user answered or escaped.
+          if (!cliLogPath && /\/antigravity-cli\/log\/cli-\d{8}_\d{6}\.log$/.test(name)) cliLogPath = name;
         }
       }
       // pick the open brain dir with the most-recently-written transcript.
@@ -1804,8 +1851,21 @@ async function listAgySessions() {
       // Live hook state for this conversation (gated to this process's lifetime).
       let cand = conversationId ? byConv[conversationId] : null;
       if (!cand && workspace) cand = byWorkspace[workspace];
-      const live = cand && startMs != null && cand.ts * 1000 >= startMs - ATTACH_SLACK_MS ? cand : null;
+      let live = cand && startMs != null && cand.ts * 1000 >= startMs - ATTACH_SLACK_MS ? cand : null;
       if (!conversationId && live) conversationId = live.conversationId; // hook fallback
+
+      // A dangling PreToolUse can't say whether agy is parked at its approval prompt
+      // or the user already escaped it — agy fires no hook either way. Ask agy's own
+      // log. Absent/unreadable → `cli` stays undefined and the old inference stands.
+      if (live && live.event === "PreToolUse" && cliLogPath) {
+        const cli = agyCliLog.confirmationState(cliLogPath, {
+          cid: conversationId || live.conversationId,
+          stepIdx: live.stepIdx,
+          sinceMs: live.ts * 1000,
+          pid: c.pid, // a log can have two writers — only this process's lines are ours
+        });
+        if (cli) live = { ...live, cli };
+      }
 
       // prompt: explicit argv prompt (print/-i) wins; else the conversation's own transcript.
       let prompt = argPrompt, promptSource = argPrompt ? "args" : null;
@@ -1815,7 +1875,7 @@ async function listAgySessions() {
       }
 
       // Display state, applying the staleness rule (see displayLiveState).
-      let { state, stateDetail, tool } = displayLiveState(live, skipPerms);
+      let { state, stateDetail, tool, cancelledTool } = displayLiveState(live, skipPerms);
 
       const summary = conversationId ? sessionSummary(conversationId) : null;
       // a turn that ended on an unanswered ```ask is waiting on the human
@@ -1853,6 +1913,9 @@ async function listAgySessions() {
         state,
         stateDetail,
         tool,
+        // set when agy's log proves the last tool call was denied/escaped — the UI
+        // must not draw that result-less tool card as a green ✓ "succeeded".
+        cancelledTool: cancelledTool || null,
         terminationReason: live ? live.terminationReason || null : null,
         stateSince: live && live.ts ? new Date(live.ts * 1000).toISOString() : null,
         hooked: !!live,

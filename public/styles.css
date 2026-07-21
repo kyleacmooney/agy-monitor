@@ -469,6 +469,8 @@ summary { list-style: none; }
 .agy-tool .glyph { font: 500 10px var(--mono); color: var(--green); flex-shrink: 0; }
 .agy-tool .glyph.live { color: var(--amber); animation: agy-pulse 1.4s ease-in-out infinite; }
 .agy-tool .glyph.await { color: var(--red); animation: agy-pulse 1.2s ease-in-out infinite; }
+/* escaped/denied at the approval prompt: it never ran, so it must not read as a ✓ */
+.agy-tool .glyph.cancelled { color: var(--dis); }
 .agy-tool .tname { font: 500 11.5px var(--mono); color: var(--text); flex-shrink: 0; }
 .agy-tool .tsum { flex: 1; min-width: 0; font: 400 11px var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agy-tool .tstat { font: 400 10px var(--mono); color: var(--dis); flex-shrink: 0; }

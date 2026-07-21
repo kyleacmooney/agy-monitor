@@ -181,6 +181,31 @@ Always bind to loopback. To reach the console from another device, front it with
 | `Stop` (`fullyIdle`) | idle — your turn |
 | `Notification` | waiting — needs attention |
 
+Only the *latest* event per conversation is kept, so a `busy` whose last event is
+older than 45s has really finished (its `Stop` was missed) and is shown as idle. The
+exception is a **dangling `PreToolUse`** — a tool call with no `PostToolUse`. That
+means `agy` is parked *at* the tool, either showing its approval prompt or running it.
+
+`agy` has no interrupt hook, and this is where it bites: pressing **Escape** at the
+approval prompt cancels the turn context, `agy` then runs the `Stop` hook *with that
+cancelled context*, and the hook is killed before it can write. The status file freezes
+on `PreToolUse` and the session would read "needs you — awaiting approval…" forever.
+
+So the monitor reads `agy`'s own process log (`~/.gemini/antigravity-cli/log/cli-*.log`,
+which `lsof` already hands us since `agy` points its stdout/stderr there) and pairs it
+with the `PreToolUse` payload's `stepIdx`:
+
+| Line in `agy`'s log | Meaning |
+|---|---|
+| `Surfacing tool confirmation: "X" at step N` | the prompt **is** up → needs you |
+| `Auto-approving tool confirmation` | never prompted → the tool is running |
+| `Tool confirmation … step N (… approved=false)` | denied/escaped → your turn, tool cancelled |
+| `failed to call custom stop hook … context canceled` | the turn ended and the `Stop` we lost |
+
+That evidence overrides every heuristic, in both directions. When the log can't be read
+the older inference stands unchanged, so the feature can only ever add certainty. A tool
+call the prompt cancelled renders `⊘ cancelled`, never a green `✓`.
+
 The model is **one card per live `agy` process** (each terminal). `agy` runs one OS process per terminal but multiplexes conversations inside it and has no session start/end hook, so the process is the reliable unit: `ps` gives liveness, `lsof` the workspace. A conversation's state attaches to a process only when its hook event fired *after* that process started, so a stale conversation in the same folder can never mislabel a fresh session. The persistent idle / your-turn state is for interactive sessions; `agy -p` print sessions exit the moment they finish.
 
 ## Safety gate
