@@ -46,6 +46,59 @@ function renderAgyMonitor(tool) {
     if (usd < 100) return "$" + usd.toFixed(2);
     return "$" + Math.round(usd);
   }
+  // Label for a folded "repeated prompt" group. The server caps first prompts at
+  // 100 chars, which lands mid-word on a long preamble — quote it and mark the cut.
+  function noiseLabel(s) {
+    if (!s) return "";
+    const t = s.trim();
+    return "“" + (t.length >= 100 ? t.slice(0, 96).replace(/\s+\S*$/, "") + "…" : t) + "”";
+  }
+
+  // Split conversation rows into the ordinary ones and the clusters the server
+  // tagged as a repeated one-shot prompt. Used by every list that shows chats.
+  function splitNoise(rows) {
+    const plain = [], byKey = new Map();
+    for (const c of rows || []) {
+      if (!c || !c.groupKey) { if (c) plain.push(c); continue; }
+      if (!byKey.has(c.groupKey)) byKey.set(c.groupKey, { key: c.groupKey, label: c.groupLabel, items: [] });
+      byKey.get(c.groupKey).items.push(c);
+    }
+    return { plain, noise: [...byKey.values()] };
+  }
+
+  // One collapsible "REPEATED PROMPT" section. Collapsed by default and its rows
+  // are built lazily on first expand — a cluster can be hundreds of chats, and
+  // building DOM for all of them just to hide it defeats the point of folding.
+  // Collapse state lives in S.collapsed so it survives the 4s/15s repaint.
+  function noiseSection(g, rowFn, matching, scope) {
+    const key = "noise:" + scope + ":" + g.key;
+    if (S.collapsed[key] === undefined) S.collapsed[key] = true;
+    let open = !S.collapsed[key], built = false;
+    const list = el("div", { class: "agy-cardlist" });
+    const fill = () => { if (built) return; built = true; for (const c of g.items) list.appendChild(rowFn(c)); };
+    if (open) fill();
+    list.style.display = open ? "" : "none";
+    const chev = el("span", { class: "chev", text: open ? "▾" : "▸" });
+    const n = g.items.length;
+    // while a query is live the count is of MATCHES, so the header never implies
+    // the fold is hiding more than the search actually found
+    const noun = matching ? (n === 1 ? " MATCH" : " MATCHES") : (n === 1 ? " CHAT" : " CHATS");
+    const head = el("div", {
+      class: "agy-chatgroup-head clickable",
+      onclick: () => {
+        open = !open;
+        S.collapsed[key] = !open;
+        if (open) fill();
+        list.style.display = open ? "" : "none";
+        chev.textContent = open ? "▾" : "▸";
+      },
+    }, [
+      chev,
+      el("span", { class: "n", text: "REPEATED PROMPT · " + n + noun }),
+      el("span", { class: "p", text: noiseLabel(g.label) }),
+    ]);
+    return el("div", { class: "agy-chatgroup" }, [head, list]);
+  }
   function tokTip(t) {
     if (!t) return "list-price estimate, not a bill";
     const n = (x) => (x || 0).toLocaleString();
@@ -2754,10 +2807,14 @@ function renderAgyMonitor(tool) {
       renderHeader();
       clear(body);
       if (!convos.length) { body.appendChild(el("div", { class: "agy-empty-dash", text: q ? "No chats match." : "No conversations yet." })); viewEl.scrollTop = scrollTop; return; }
+      // Rows the server tagged as a repeated one-shot prompt (a commit-message
+      // helper, a judge, a probe) fold into one group below the real projects —
+      // otherwise hundreds of them bury every hand-written chat.
+      const { plain, noise } = splitNoise(convos);
       const groups = new Map();
-      for (const c of convos) {
+      for (const c of plain) {
         const key = c.workspace || "(no workspace)";
-        if (!groups.has(key)) groups.set(key, { project: c.project, shortWorkspace: c.shortWorkspace, workspace: c.workspace, items: [] });
+        if (!groups.has(key)) groups.set(key, { project: c.project, shortWorkspace: c.shortWorkspace, items: [] });
         groups.get(key).items.push(c);
       }
       for (const g of groups.values()) {
@@ -2772,6 +2829,7 @@ function renderAgyMonitor(tool) {
         sec.appendChild(list);
         body.appendChild(sec);
       }
+      for (const g of noise) body.appendChild(noiseSection(g, (c) => chatRow(c, q, liveCids), !!q, "all"));
       viewEl.scrollTop = scrollTop;
     }
     let searchTimer = null;
@@ -2781,10 +2839,17 @@ function renderAgyMonitor(tool) {
       clear(contentBox);
       if (!lastMatches.length) return;
       contentBox.appendChild(el("div", { class: "agy-sub-note", text: "FOUND INSIDE " + lastMatches.length + " MORE CONVERSATION" + (lastMatches.length === 1 ? "" : "S") }));
-      const list = el("div", { class: "agy-cardlist" });
       const liveCids = liveSet();
-      for (const c of lastMatches) list.appendChild(chatRow(c, lastQ, liveCids));
-      contentBox.appendChild(list);
+      // A content query matches the transcript BODY, so a repeated one-shot
+      // prompt hits on every single run — this section floods harder than the
+      // list above it. Same fold, and the count above stays the true total.
+      const { plain, noise } = splitNoise(lastMatches);
+      if (plain.length) {
+        const list = el("div", { class: "agy-cardlist" });
+        for (const c of plain) list.appendChild(chatRow(c, lastQ, liveCids));
+        contentBox.appendChild(list);
+      }
+      for (const g of noise) contentBox.appendChild(noiseSection(g, (c) => chatRow(c, lastQ, liveCids), true, "found"));
     }
     function scheduleContentSearch() {
       const q = (search.value || "").trim();
@@ -2960,21 +3025,26 @@ function renderAgyMonitor(tool) {
       const convos = res.conversations || [];
       page.appendChild(el("span", { class: "agy-lbl", text: (proj || "PROJECT").toUpperCase() + " — PAST CONVERSATIONS · " + convos.length }));
       if (!convos.length) { page.appendChild(el("div", { class: "agy-empty-dash", text: "No recorded conversations for this project." })); return; }
-      const list = el("div", { class: "agy-cardlist" });
-      for (const c of convos) {
-        list.appendChild(el("div", {
-          class: "agy-chatrow",
-          onclick: () => openConvo({ conversationId: c.conversationId, title: c.title, project: proj, shortWorkspace: res.shortWorkspace, workspace: ctx.workspace, historical: true }),
-        }, [
-          el("span", { class: "mid" }, [el("span", { class: "t", text: c.title || "(untitled)" })]),
-          c.backfilled ? el("span", { class: "agy-srctag", text: "RECOVERED", title: "recovered from brain/ — agy never wrote this conversation to its /resume index" }) : null,
-          c.source === "ide" ? el("span", { class: "agy-srctag", text: "IDE" }) : null,
-          el("span", { class: "cost", text: c.costUsd != null ? fmtCost(c.costUsd) : "" }),
-          el("span", { class: "steps", text: c.numSteps != null ? c.numSteps + " st" : "" }),
-          el("span", { class: "ago", text: c.updatedAt ? tsAgoShort(Date.parse(c.updatedAt)) : "" }),
-        ]));
+      const histRow = (c) => el("div", {
+        class: "agy-chatrow",
+        onclick: () => openConvo({ conversationId: c.conversationId, title: c.title, project: proj, shortWorkspace: res.shortWorkspace, workspace: ctx.workspace, historical: true }),
+      }, [
+        el("span", { class: "mid" }, [el("span", { class: "t", text: c.title || "(untitled)" })]),
+        c.backfilled ? el("span", { class: "agy-srctag", text: "RECOVERED", title: "recovered from brain/ — agy never wrote this conversation to its /resume index" }) : null,
+        c.source === "ide" ? el("span", { class: "agy-srctag", text: "IDE" }) : null,
+        el("span", { class: "cost", text: c.costUsd != null ? fmtCost(c.costUsd) : "" }),
+        el("span", { class: "steps", text: c.numSteps != null ? c.numSteps + " st" : "" }),
+        el("span", { class: "ago", text: c.updatedAt ? tsAgoShort(Date.parse(c.updatedAt)) : "" }),
+      ]);
+      // A helper that runs inside this repo floods its History tab too — same fold
+      // as All chats, and the count in the label above stays the true total.
+      const { plain, noise } = splitNoise(convos);
+      if (plain.length) {
+        const list = el("div", { class: "agy-cardlist" });
+        for (const c of plain) list.appendChild(histRow(c));
+        page.appendChild(list);
       }
-      page.appendChild(list);
+      for (const g of noise) page.appendChild(noiseSection(g, histRow, false, "hist"));
     })();
   }
 
@@ -3233,7 +3303,19 @@ function renderAgyMonitor(tool) {
     if (Date.now() - _palChats.at < 30000) return;
     runTool(tool.id, { action: "list-all-conversations" }).then((r) => {
       // refresh only the RESULT LIST — replacing the input mid-typing scrambles the caret
-      if (r && r.ok) { _palChats.list = (r.conversations || []).slice(0, 20); _palChats.at = Date.now(); if (S.palOpen && palDrawList) palDrawList(); }
+      if (r && r.ok) {
+        // one representative per folded cluster: 200 commit-helper runs would
+        // otherwise BE the palette, before the slice ever reaches a real chat
+        const seenGroup = new Set();
+        _palChats.list = (r.conversations || []).filter((c) => {
+          if (!c.groupKey) return true;
+          if (seenGroup.has(c.groupKey)) return false;
+          seenGroup.add(c.groupKey);
+          return true;
+        }).slice(0, 20);
+        _palChats.at = Date.now();
+        if (S.palOpen && palDrawList) palDrawList();
+      }
     }).catch(() => {});
   }
   function openPalette(pick) {

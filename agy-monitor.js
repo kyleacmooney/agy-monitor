@@ -26,6 +26,7 @@ const { execFile, execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { StringDecoder } = require("string_decoder"); // chunked transcript reads must not split a multi-byte char
 const agyPolicy = require("./agy-policy"); // classify a run_command → does agy prompt on it?
 
 // AGY_MONITOR_ROOT / AGY_CLI_HOME let the server tests point everything at
@@ -265,7 +266,9 @@ function getCostSummary(days) {
     if (bucket >= 0 && bucket < SPARK_BUCKETS) spark[bucket] += c.costUsd;
     items.push({
       conversationId: cid,
-      title: (sm && (cleanTitle(sm.Title) || cleanTitle(sm.Preview))) || firstUserPrompt(cid) || null,
+      // cached: this runs on the 4s/15s SPEND poll, and the fallback fires for
+      // every conversation agy left untitled
+      title: (sm && (cleanTitle(sm.Title) || cleanTitle(sm.Preview))) || cachedFirstUserPrompt(cid) || null,
       costUsd: c.costUsd,
       updatedAt: new Date(mtimeMs).toISOString(),
       project: sm && sm.WorkspaceURIs && sm.WorkspaceURIs[0] ? path.basename(uriToPath(sm.WorkspaceURIs[0])) : null,
@@ -305,9 +308,17 @@ function stripUserRequest(content) {
   if (typeof content !== "string") return "";
   const m = content.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/);
   let s = (m ? m[1] : content);
-  // Unwrapped inputs (none on disk today, but titles are derived from this) still
-  // carry agy's trailing context blocks — they are not part of what the user typed.
-  if (!m) s = s.replace(/<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>[\s\S]*?<\/\1>/g, "");
+  if (!m) {
+    // A LEADING opening tag with no closer means we're looking at a truncated head
+    // (see firstUserPrompt's salvage path) — take what follows it rather than
+    // leaking the literal tag into a title. Anchored on purpose: an unwrapped
+    // prompt that merely mentions "<USER_REQUEST>" must keep the words before it.
+    const open = /^\s*<USER_REQUEST>\s*/.exec(s);
+    if (open) s = s.slice(open[0].length);
+    // Unwrapped inputs (none on disk today, but titles are derived from this) still
+    // carry agy's trailing context blocks — they are not part of what the user typed.
+    else s = s.replace(/<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>[\s\S]*?<\/\1>/g, "");
+  }
   const i = s.indexOf(ASK_MARK);
   if (i >= 0) s = s.slice(0, i).replace(/\s+$/, "");
   return s.trim();
@@ -573,28 +584,115 @@ function readContextFile(p, scope) {
   }
 }
 
-// The opening user prompt of a conversation, read from the head of its transcript
-// (more reliable as a title than history.jsonl, which can miss the first turn).
-function firstUserPrompt(conversationId) {
-  const tp = path.join(BRAIN_DIR, conversationId, ".system_generated", "logs", "transcript_full.jsonl");
-  let text;
-  try {
-    const fd = fs.openSync(tp, "r");
-    const buf = Buffer.alloc(16384);
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    fs.closeSync(fd);
-    text = buf.subarray(0, n).toString("utf8");
-  } catch { return null; }
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    let e;
-    try { e = JSON.parse(line); } catch { continue; } // last line may be truncated — skip
-    if (e.type === "USER_INPUT" && typeof e.content === "string") {
-      const t = stripUserRequest(e.content);
-      if (t) return t.replace(/\s+/g, " ").slice(0, 100);
+function transcriptPathFor(conversationId) {
+  return path.join(BRAIN_DIR, conversationId, ".system_generated", "logs", "transcript_full.jsonl");
+}
+
+const PROMPT_SCAN_MAX = 256 * 1024; // how much of a transcript head we'll read looking for the first user turn
+const PROMPT_CHUNK = 64 * 1024;
+const PROMPT_SALVAGE_MAX = 4096;    // chars of a truncated content string to decode by hand
+
+// A prompt out of one parsed transcript row, in the shape every caller expects.
+function promptFromRow(e) {
+  if (!e || e.type !== "USER_INPUT" || typeof e.content !== "string") return null;
+  const t = stripUserRequest(e.content);
+  return t ? t.replace(/\s+/g, " ").slice(0, 100) : null;
+}
+
+// Decode the opening `want` characters of a JSON string body that runs past our
+// read window (so it can never be JSON.parse'd). Stops cleanly on an escape that
+// straddles the boundary rather than emitting a mangled character.
+function jsonStringPrefix(raw, want) {
+  const SHORT = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", '"': '"', "\\": "\\", "/": "/" };
+  let out = "";
+  for (let i = 0; i < raw.length && out.length < want; i++) {
+    const ch = raw[i];
+    if (ch === '"') break;       // the string actually ended here
+    if (ch !== "\\") { out += ch; continue; }
+    const nx = raw[i + 1];
+    if (nx === undefined) break; // escape cut in half by the window
+    if (nx === "u") {
+      const hex = raw.slice(i + 2, i + 6);
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) break;
+      out += String.fromCharCode(parseInt(hex, 16)); // surrogate halves reassemble on concat
+      i += 5;
+    } else {
+      out += SHORT[nx] !== undefined ? SHORT[nx] : nx;
+      i += 1;
     }
   }
-  return null;
+  return out;
+}
+
+// Last resort for a first user turn whose JSON line is bigger than PROMPT_SCAN_MAX.
+// A tool that sends "<instructions> + full git diff" writes that as ONE line, so
+// this is the normal case for large commits — without it those conversations are
+// permanently untitled and unclusterable. We only ever show the first 100 chars,
+// so recover them straight out of the raw, unparseable record.
+function salvagePrompt(record) {
+  if (!record.includes('"type":"USER_INPUT"')) return null;
+  const m = /"content"\s*:\s*"/.exec(record);
+  if (!m) return null;
+  const t = stripUserRequest(jsonStringPrefix(record.slice(m.index + m[0].length), PROMPT_SALVAGE_MAX));
+  return t ? t.replace(/\s+/g, " ").slice(0, 100) : null;
+}
+
+// The opening user prompt of a conversation, read from the head of its transcript
+// (more reliable as a title than history.jsonl, which can miss the first turn).
+// Reads forward a chunk at a time and parses only COMPLETE lines, so a single
+// oversized row can't hide the turn behind it; StringDecoder keeps multi-byte
+// characters intact across chunk boundaries.
+function firstUserPrompt(conversationId) {
+  let fd;
+  try { fd = fs.openSync(transcriptPathFor(conversationId), "r"); } catch { return null; }
+  const buf = Buffer.alloc(PROMPT_CHUNK);
+  const dec = new StringDecoder("utf8");
+  let carry = "", pos = 0, eof = false; // carry = text after the last newline seen
+  try {
+    while (pos < PROMPT_SCAN_MAX) {
+      let n;
+      try { n = fs.readSync(fd, buf, 0, Math.min(buf.length, PROMPT_SCAN_MAX - pos), pos); } catch { break; }
+      if (n <= 0) { eof = true; break; }
+      pos += n;
+      carry += dec.write(buf.subarray(0, n));
+      let i;
+      while ((i = carry.indexOf("\n")) >= 0) {
+        const line = carry.slice(0, i);
+        carry = carry.slice(i + 1);
+        if (!line.trim()) continue;
+        let e;
+        try { e = JSON.parse(line); } catch { continue; } // a genuinely corrupt row — skip it
+        const t = promptFromRow(e);
+        if (t) return t;
+      }
+    }
+  } finally { fs.closeSync(fd); }
+  carry += dec.end();
+  if (!carry.trim()) return null;
+  if (eof) { // a final line with no trailing newline — parse it if we can
+    let e = null;
+    try { e = JSON.parse(carry); } catch {} // a run killed mid-flush leaves a half record
+    const t = promptFromRow(e);
+    if (t) return t;
+  }
+  // stopped at the cap, or the trailing record is unparseable: recover by hand
+  return salvagePrompt(carry);
+}
+
+// firstUserPrompt is now read on EVERY all-chats row (it is the only field that
+// identifies a repeated one-shot prompt), so memoize it the way transcriptStats
+// does. A conversation's opening turn never changes, but the mtime key keeps a
+// conversation that was empty on first read from staying untitled forever.
+const _promptCache = new Map(); // transcriptPath -> { mtimeMs, val }
+function cachedFirstUserPrompt(conversationId) {
+  const tp = transcriptPathFor(conversationId);
+  let st;
+  try { st = fs.statSync(tp); } catch { return null; }
+  const hit = _promptCache.get(tp);
+  if (hit && hit.mtimeMs === st.mtimeMs) return hit.val;
+  const val = firstUserPrompt(conversationId);
+  _promptCache.set(tp, { mtimeMs: st.mtimeMs, val });
+  return val;
 }
 
 function uriToPath(u) {
@@ -640,7 +738,7 @@ function conversationsForWorkspace(workspace) {
     if (hist[cid] !== wsNorm) continue;
     const o = hydrateOrphan(cid, stats, hist, model);
     out.push({
-      conversationId: o.conversationId, title: o.title, numSteps: o.numSteps,
+      conversationId: o.conversationId, title: o.title, firstPrompt: o.firstPrompt, numSteps: o.numSteps,
       updatedAt: o.updatedAt, source: o.source, costUsd: o.costUsd, backfilled: true,
     });
   }
@@ -650,15 +748,18 @@ function conversationsForWorkspace(workspace) {
     const uris = Array.isArray(sm.WorkspaceURIs) ? sm.WorkspaceURIs.map(uriToPath) : [];
     if (!uris.includes(wsNorm)) continue;
     const cost = conversationCost(cid, model);
+    const fp = cachedFirstUserPrompt(cid);
     out.push({
       conversationId: cid,
-      title: cleanTitle(sm.Title) || cleanTitle(sm.Preview) || firstUserPrompt(cid) || null,
+      title: cleanTitle(sm.Title) || cleanTitle(sm.Preview) || fp || null,
+      firstPrompt: fp,
       numSteps: sm.NumSteps || 0,
       updatedAt: sm.UpdatedAt || null,
       source: sm.AppDataDir === "antigravity" ? "ide" : "cli",
       costUsd: cost ? cost.costUsd : null,
     });
   }
+  tagClusters(out); // a helper that runs inside a repo floods that project's History tab too
   out.sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0));
   return out;
 }
@@ -680,9 +781,13 @@ function conversationsFromHistory(workspace) {
     if (ts >= c.lastTs) c.lastTs = ts;
     byCid[e.conversationId] = c;
   }
-  return Object.values(byCid)
+  const rows = Object.values(byCid)
     .sort((a, b) => b.lastTs - a.lastTs)
-    .map((c) => ({ conversationId: c.conversationId, title: firstUserPrompt(c.conversationId), numSteps: null, updatedAt: c.lastTs ? new Date(c.lastTs).toISOString() : null, source: "cli" }));
+    .map((c) => {
+      const fp = cachedFirstUserPrompt(c.conversationId);
+      return { conversationId: c.conversationId, title: fp, firstPrompt: fp, numSteps: null, updatedAt: c.lastTs ? new Date(c.lastTs).toISOString() : null, source: "cli" };
+    });
+  return tagClusters(rows);
 }
 
 // Resolve the agy binary (the hub may run without ~/.local/bin on PATH).
@@ -1111,6 +1216,7 @@ function hydrateOrphan(cid, stats, hist, model) {
   return {
     conversationId: cid,
     title: stats.title,
+    firstPrompt: stats.title, // transcriptStats' title IS the first user prompt — free here
     project: ws ? path.basename(ws) : null, workspace: ws, shortWorkspace: ws ? homeShort(ws) : null,
     numSteps: stats.numSteps, updatedAt: stats.updatedAt,
     source: "cli", // a dir under antigravity-cli/brain is by definition a CLI run
@@ -1122,10 +1228,28 @@ function hydrateOrphan(cid, stats, hist, model) {
 // Every unindexed brain conversation, fully hydrated, in allHistory()'s row shape.
 // Bounded: a missing/corrupt index makes EVERY brain dir an orphan, so hydrate
 // only the most recently active ORPHAN_HYDRATE_MAX of them.
+//
+// That budget is allocated to UNCLUSTERED chats first. A tool driving `agy -p`
+// leaves hundreds of unindexed runs, all newer than your real work, and a plain
+// newest-first cut would spend every slot on them — silently dropping genuinely
+// recovered chats from All chats while the project's own History tab (uncapped)
+// still lists them. Folding the noise is no help if the noise already evicted
+// the rows it was meant to make room for.
 function orphanConversations(convos, model) {
   const found = orphanCids(convos);
   if (found.length > ORPHAN_HYDRATE_MAX) {
-    found.sort((a, b) => b.stats.mtimeMs - a.stats.mtimeMs);
+    const min = noiseMinCluster();
+    const counts = new Map();
+    // free: transcriptStats already computed each opening prompt as stats.title
+    if (min > 0) for (const f of found) {
+      const k = promptKey(f.stats && f.stats.title);
+      if (k) counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    const clustered = (f) => {
+      const k = min > 0 ? promptKey(f.stats && f.stats.title) : null;
+      return k && counts.get(k) >= min ? 1 : 0;
+    };
+    found.sort((a, b) => clustered(a) - clustered(b) || b.stats.mtimeMs - a.stats.mtimeMs);
     found.length = ORPHAN_HYDRATE_MAX;
   }
   const hist = historyWorkspaces();
@@ -1142,6 +1266,68 @@ function conversationWorkspace(conversationId, convos) {
   return historyWorkspaces()[conversationId] || null;
 }
 
+// --- noise clustering: fold repeated one-shot prompts -------------------------
+// A tool that shells out to `agy -p` on a schedule — a commit-message helper, a
+// judge, a health probe — produces hundreds of conversations whose opening turn
+// is identical apart from its payload, and they bury every hand-written chat.
+//
+// Such rows are real, billed conversations, so they are never dropped: they are
+// TAGGED with a shared groupKey and the UI folds them into one collapsible group.
+// Grouping rather than hiding keeps the header count, full-text search and the
+// SPEND rollup honest, and keeps every chat one click away.
+//
+// The first user prompt is the only field that identifies them — agy's own Title
+// is empty in practice and its Preview summarizes the REPLY (for a commit helper,
+// the generated message), which differs every run.
+
+const NOISE_KEY_LEN = 64; // prefix length that defines "the same opening prompt"
+const NOISE_MIN_LEN = 20; // below this a prompt ("hi", "go on") is too generic to cluster on
+
+function noiseMinCluster() {
+  // an empty/blank value means "unset", not 0 — Number("") is 0, and a blank
+  // config.json entry silently turning the fold off is not a helpful default
+  const raw = (process.env.AGY_NOISE_MIN_CLUSTER || "").trim();
+  if (!raw) return 5;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5; // 0 disables folding entirely
+}
+
+// Stable identity for "these conversations opened the same way". Producers of
+// firstPrompt already collapse whitespace and cap at 100 chars, so this only has
+// to fold case and take the shared prefix.
+function promptKey(prompt) {
+  if (typeof prompt !== "string") return null;
+  const s = prompt.replace(/\s+/g, " ").trim().toLowerCase();
+  if (s.length < NOISE_MIN_LEN) return null;
+  return s.slice(0, NOISE_KEY_LEN);
+}
+
+// Tag every row in a cluster of >= min identical openings with groupKey/groupLabel.
+// Mutates and returns `rows`; rows outside a cluster are left without the keys at
+// all, so the UI's `c.groupKey || c.workspace` grouping stays a one-liner.
+function tagClusters(rows, min) {
+  const n = min == null ? noiseMinCluster() : min;
+  if (!Array.isArray(rows) || !(n > 0)) return rows;
+  const counts = new Map(), labels = new Map();
+  for (const r of rows) {
+    const k = promptKey(r && r.firstPrompt);
+    if (!k) continue;
+    counts.set(k, (counts.get(k) || 0) + 1);
+    // smallest member wins, so the label is a function of the CLUSTER and not of
+    // whatever order this caller happened to build its rows in — All chats and a
+    // project's History tab must not label the same group differently
+    const prev = labels.get(k);
+    if (prev === undefined || r.firstPrompt < prev) labels.set(k, r.firstPrompt);
+  }
+  for (const r of rows) {
+    const k = promptKey(r && r.firstPrompt);
+    if (!k || counts.get(k) < n) continue;
+    r.groupKey = k;
+    r.groupLabel = labels.get(k);
+  }
+  return rows;
+}
+
 // Every conversation across ALL workspaces (the dashboard's "all chats" browser),
 // newest first — so you can reach history for projects with no running session.
 function allHistory() {
@@ -1151,14 +1337,15 @@ function allHistory() {
   for (const [cid, rec] of Object.entries(convos || {})) {
     const sm = rec && rec.summary;
     if (!sm || rec.is_internal) continue;
-    const title = cleanTitle(sm.Title) || cleanTitle(sm.Preview) || firstUserPrompt(cid) || null;
+    const fp = cachedFirstUserPrompt(cid); // also the title fallback — one read serves both
+    const title = cleanTitle(sm.Title) || cleanTitle(sm.Preview) || fp || null;
     if (!title && (sm.NumSteps || 0) === 0) continue; // skip empty placeholder conversations
     const u = Array.isArray(sm.WorkspaceURIs) && sm.WorkspaceURIs[0] ? uriToPath(sm.WorkspaceURIs[0]) : null;
     const ts = Date.parse(sm.UpdatedAt);
     const cost = conversationCost(cid, model);
     out.push({
       conversationId: cid,
-      title,
+      title, firstPrompt: fp,
       project: u ? path.basename(u) : null, workspace: u, shortWorkspace: u ? homeShort(u) : null,
       numSteps: sm.NumSteps || 0, updatedAt: ts > 9.4e11 ? sm.UpdatedAt : null, // ignore bogus pre-2000 stamps
       source: sm.AppDataDir === "antigravity" ? "ide" : "cli",
@@ -1166,6 +1353,7 @@ function allHistory() {
     });
   }
   for (const c of orphanConversations(convos, model)) out.push(c); // brain/ dirs the index never learned about
+  tagClusters(out); // fold repeated one-shot prompts into one collapsible UI group
   out.sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0));
   return { ok: true, conversations: out };
 }
@@ -1206,9 +1394,11 @@ function searchConversations(query) {
     const u = Array.isArray(sm.WorkspaceURIs) && sm.WorkspaceURIs[0] ? uriToPath(sm.WorkspaceURIs[0]) : null;
     const ts = Date.parse(sm.UpdatedAt);
     const cost = conversationCost(cid, model);
+    const fp = cachedFirstUserPrompt(cid);
     matches.push({
       conversationId: cid,
-      title: cleanTitle(sm.Title) || cleanTitle(sm.Preview) || firstUserPrompt(cid) || null,
+      title: cleanTitle(sm.Title) || cleanTitle(sm.Preview) || fp || null,
+      firstPrompt: fp,
       project: u ? path.basename(u) : null, workspace: u, shortWorkspace: u ? homeShort(u) : null,
       numSteps: sm.NumSteps || 0, updatedAt: ts > 9.4e11 ? sm.UpdatedAt : null,
       source: sm.AppDataDir === "antigravity" ? "ide" : "cli",
@@ -1226,6 +1416,9 @@ function searchConversations(query) {
     if (!raw.toLowerCase().includes(q)) continue;
     matches.push({ ...hydrateOrphan(cid, stats, hist, model), snippet: snippetFor(tp, q) });
   }
+  // Same fold as allHistory. Without it the grouped chats reappear one by one in
+  // the "FOUND INSIDE N MORE CONVERSATIONS" section on the very next keystroke.
+  tagClusters(matches);
   matches.sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0));
   return { ok: true, matches };
 }
@@ -1787,7 +1980,7 @@ const agyMonitor = {
   },
 };
 
-module.exports = { agyMonitor, listAgySessions, deriveState, displayLiveState, BUSY_STALE_MS, classifyArgs, unescapePsArg };
+module.exports = { agyMonitor, listAgySessions, deriveState, displayLiveState, BUSY_STALE_MS, classifyArgs, unescapePsArg, promptKey, tagClusters, noiseMinCluster, stripUserRequest };
 
 if (require.main === module) {
   agyMonitor.run({ action: "fetch-sessions" }).then((res) => {

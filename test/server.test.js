@@ -111,6 +111,100 @@ const { start } = require("../server");
   fx.assert(gh.ok === true && (gh.conversations || []).some((c) => c.conversationId === ORPHAN && c.backfilled === true),
     "backfilled conversation appears in its own project's History tab", failures);
 
+  // --- noise folding: a helper that drives `agy -p` on every commit ----------
+  // The decisive detail: one such prompt lands BOTH as an indexed record and as
+  // an unindexed brain/ orphan, so a fix that only reaches one path leaves most
+  // of the flood on screen. Seed both shapes and assert they share a group.
+  const COMMIT_PROMPT = "Write a concise Git commit message for the following changes. Follow Conventional Commits format if possible...";
+  const commitWs = path.join(roots.base, "commit-ws");
+  fs.mkdirSync(commitWs, { recursive: true });
+  const commitCids = [];
+  for (let i = 0; i < 6; i++) {
+    const cid = `bbbbbbbb-cccc-dddd-eeee-ffff0000000${i}`;
+    commitCids.push(cid);
+    // i<3 indexed, i>=3 orphan. #2 (indexed) and #5 (orphan) carry a diff far past
+    // any bounded head read — the case that used to come back title-less and
+    // unclusterable, and it has to be covered on BOTH code paths.
+    fx.writeConversation(roots.agyHome, { cid, workspace: commitWs, indexed: i < 3, prompt: COMMIT_PROMPT, padBytes: (i === 2 || i === 5) ? 300000 : 0 });
+    if (i >= 3) fx.writeHistoryLine(roots.agyHome, { cid, workspace: commitWs });
+  }
+
+  const folded = await post({ action: "list-all-conversations" });
+  const frows = (folded.conversations || []).filter((c) => commitCids.includes(c.conversationId));
+  fx.assert(frows.length === 6, "every commit-helper conversation is still listed — folded, not dropped", failures);
+  const gk = frows[0] && frows[0].groupKey;
+  fx.assert(!!gk && frows.every((c) => c.groupKey === gk), "all 6 share one groupKey across the indexed/orphan split", failures);
+  fx.assert(frows.some((c) => c.backfilled === true) && frows.some((c) => c.backfilled === undefined),
+    "…and that really was a mix of indexed and backfilled rows", failures);
+  fx.assert(frows.every((c) => (c.groupLabel || "").startsWith("Write a concise Git commit message")),
+    "the group label is the shared prompt", failures);
+  // #2 is the load-bearing one: the INDEXED path reads a bounded head, so a
+  // 300KB single-line record forces the by-hand salvage. (#5 is the same bytes on
+  // the orphan path, which reads the whole file and never exercises that code —
+  // it is here to prove the two paths agree, not as read-window coverage.)
+  for (const [i, via] of [[2, "indexed — bounded read + salvage"], [5, "backfilled — whole-file read"]]) {
+    const bigRow = frows.find((c) => c.conversationId === commitCids[i]);
+    fx.assert(bigRow && (bigRow.firstPrompt || "").startsWith("Write a concise Git commit message"),
+      `a first turn of 300KB still yields its prompt, not null (${via})`, failures);
+    fx.assert(bigRow && !/USER_REQUEST/.test(bigRow.firstPrompt || ""),
+      `…with no leaked wrapper tag (${via})`, failures);
+  }
+  fx.assert(frows.find((c) => c.conversationId === commitCids[2]).groupKey === gk,
+    "…and the salvaged prompt clusters with the small ones", failures);
+
+  // a run killed mid-flush leaves ONE half-written record and no trailing newline.
+  // It never parses, but its head carries the prompt — and the mtime never changes
+  // again, so giving up here would cache "untitled" forever.
+  const TRUNC = "cccccccc-dddd-eeee-ffff-000000000003";
+  fx.writeConversation(roots.agyHome, { cid: TRUNC, workspace: commitWs, title: "", prompt: COMMIT_PROMPT });
+  const half = JSON.stringify({ step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-07-01T12:00:00Z", content: "<USER_REQUEST> " + COMMIT_PROMPT + " diff --git a/server.js b/server.js" });
+  fs.writeFileSync(path.join(roots.agyHome, "brain", TRUNC, ".system_generated", "logs", "transcript_full.jsonl"), half.slice(0, -40));
+  const truncRow = ((await post({ action: "list-all-conversations" })).conversations || []).find((c) => c.conversationId === TRUNC);
+  fx.assert(truncRow && (truncRow.firstPrompt || "").startsWith("Write a concise Git commit message"),
+    "a transcript cut off mid-record still yields its prompt", failures);
+  fx.assert(truncRow && truncRow.groupKey === gk, "…and joins the cluster rather than sitting alone", failures);
+  const idxCommit = frows.find((c) => c.conversationId === commitCids[0]);
+  fx.assert(idxCommit && (idxCommit.firstPrompt || "").startsWith("Write a concise Git commit message"),
+    "indexed rows carry firstPrompt — agy's Preview alone could never identify them", failures);
+  fx.assert(idxCommit && idxCommit.title === "Test convo" && idxCommit.firstPrompt !== idxCommit.title,
+    "…and firstPrompt is independent of the displayed title", failures);
+  fx.assert((folded.conversations || []).some((c) => c.conversationId === fx.CID && c.groupKey === undefined),
+    "a chat with a one-off prompt is never folded", failures);
+  fx.assert((folded.conversations || []).some((c) => c.conversationId === ORPHAN && c.groupKey === undefined),
+    "…nor is the pre-existing backfilled chat", failures);
+
+  // the fold must reach search too, or the group reappears row-by-row under
+  // "FOUND INSIDE N MORE CONVERSATIONS" on the next keystroke
+  const csearch = await post({ action: "search-conversations", query: "conventional commits" });
+  const smatch = (csearch.matches || []).filter((m) => commitCids.includes(m.conversationId));
+  fx.assert(smatch.length >= 5 && smatch.every((m) => m.groupKey === gk), "search results carry the same groupKey", failures);
+
+  // and the project's own History tab, where the same helper also piles up
+  const ghc = await post({ action: "get-history", workspace: commitWs });
+  const hrows = (ghc.conversations || []).filter((c) => commitCids.includes(c.conversationId));
+  fx.assert(hrows.length === 6 && hrows.every((c) => c.groupKey === gk), "project History tab folds the same cluster", failures);
+
+  // Hydration budget: unindexed one-shot runs are ALWAYS newer than your real
+  // work, so a plain newest-first cut at ORPHAN_HYDRATE_MAX spends every slot on
+  // them and a genuinely recovered chat silently vanishes from All chats — the
+  // fold cannot give back a row that was dropped before it ran.
+  const REAL_OLD = "cccccccc-dddd-eeee-ffff-000000000001";
+  fx.writeConversation(roots.agyHome, { cid: REAL_OLD, indexed: false, prompt: "why does the daemon bootstrap race when launchd relaunches it" });
+  fx.writeHistoryLine(roots.agyHome, { cid: REAL_OLD, workspace: orphanWs });
+  const oldTx = path.join(roots.agyHome, "brain", REAL_OLD, ".system_generated", "logs", "transcript_full.jsonl");
+  const aMonthAgo = new Date(Date.now() - 30 * 86400000);
+  fs.utimesSync(oldTx, aMonthAgo, aMonthAgo); // older than every commit run below
+  for (let i = 0; i < 70; i++) {
+    fx.writeConversation(roots.agyHome, { cid: `dddddddd-eeee-ffff-0000-0000000000${String(i).padStart(2, "0")}`, indexed: false, prompt: COMMIT_PROMPT });
+  }
+  const flooded = (await post({ action: "list-all-conversations" })).conversations || [];
+  fx.assert(flooded.some((c) => c.conversationId === REAL_OLD),
+    "a month-old recovered chat survives 70 newer folded one-shot runs", failures);
+  fx.assert(flooded.some((c) => c.conversationId === ORPHAN),
+    "…as does the earlier backfilled chat", failures);
+  fx.assert(flooded.filter((c) => c.groupKey === gk).length > 5,
+    "…and the cluster still fills the rest of the budget", failures);
+
   // no history line ⇒ workspace is legitimately null, and the row still lists
   const LOOSE = "aaaaaaaa-bbbb-cccc-dddd-eeeeffff000c";
   fx.writeConversation(roots.agyHome, { cid: LOOSE, indexed: false });

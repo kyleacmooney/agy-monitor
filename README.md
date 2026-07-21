@@ -15,6 +15,7 @@ A local web console for Google's [Antigravity CLI](https://antigravity.google) (
 - **Composer** — continue any conversation or start a new one from the browser; new turns stream back in. Forking and `/btw` side-questions branch a conversation without disturbing the original.
 - **Command-approval safety gate** — UI-triggered runs route their shell commands through an LLM-backed gate. Safelisted commands auto-run; anything else pauses for a one-click Approve/Deny. Fails closed. A learned safelist proposes minimal, Claude-Code-style prefixes you can promote or demote.
 - **Cost estimates** — per-conversation list-price estimates plus a global spend rollup, decoded dependency-free from `agy`'s own token-usage metadata.
+- **Repeated prompts fold** — a script that drives `agy -p` on a loop (a commit-message helper, a judge, a health probe) would otherwise bury every hand-written chat. Conversations that open with the same prompt collapse into one group you can expand. Nothing is hidden from the counts, from search, or from the spend rollup — see `AGY_NOISE_MIN_CLUSTER`.
 - **Workspace diffs** and an **MCP panel** that enumerates and probes the MCP servers `agy` can actually load.
 - **Other agents, read-only** — surfaces local [Codex CLI](https://github.com/openai/codex) and VS Code Copilot chat sessions alongside your `agy` ones.
 - **Fan-out** — run N parallel `agy` workers on one task, each in its own git worktree, then let a Claude judge rank or merge the results.
@@ -114,6 +115,7 @@ Every setting is an environment variable. You can also drop them in `~/.agy-moni
 | `AGY_MONITOR_LABEL` | `com.<you>.agy-monitor` | launchd label. |
 | `AGY_MONITOR_EXTRA_ROOTS` | *(none)* | Extra workspace roots to scan for sessions. |
 | `AGY_MONITOR_SELF_UPDATE` | *(off)* | Set `1` to enable the live "improve this app" self-update. Off by default. |
+| `AGY_NOISE_MIN_CLUSTER` | `5` | Chats that open with the same prompt fold into one collapsible group at this count. `0` disables folding. |
 
 ### Claude transport
 

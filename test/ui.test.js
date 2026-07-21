@@ -149,6 +149,55 @@ const SHOTS = path.join(__dirname, "shots");
   await page.waitForSelector(".agy-srctag.live", { state: "detached", timeout: 12000 });
   fx.assert(await page.locator(".agy-srctag.live").count() === 0, "the LIVE chip clears when the run ends", failures);
 
+  // a git-commit helper driving `agy -p` folds into ONE collapsible group.
+  // Seeded indexed-only and with distinct titles so the RECOVERED-chip and
+  // "Test convo" locators above stay unambiguous.
+  const COMMIT_PROMPT = "Write a concise Git commit message for the following changes. Follow Conventional Commits format if possible...";
+  for (let i = 0; i < 6; i++) {
+    fx.writeConversation(roots.agyHome, { cid: `bbbbbbbb-cccc-dddd-eeee-ffff0000000${i}`, workspace: ws, title: "commit run " + i, prompt: COMMIT_PROMPT });
+  }
+  await page.click(".agy-nav-item:has-text('Overview')");
+  await page.click(".agy-nav-item:has-text('All chats')");
+  const noiseHead = page.locator(".agy-chatgroup-head.clickable");
+  await noiseHead.waitFor({ timeout: 8000 });
+  fx.assert(/REPEATED PROMPT · 6 CHATS/.test(await noiseHead.textContent()), "repeated one-shot prompts fold into one group, counted", failures);
+  fx.assert(/Write a concise Git commit message/.test(await noiseHead.textContent()), "the group is labelled with the shared prompt", failures);
+  // by head TEXT, not by .clickable — while searching the head is not a control
+  const noiseGroup = page.locator(".agy-chatgroup", { has: page.locator(".agy-chatgroup-head", { hasText: "REPEATED PROMPT" }) });
+  fx.assert(await noiseGroup.locator(".agy-chatrow").count() === 0, "the group arrives collapsed — none of its rows are in the DOM", failures);
+  fx.assert(await page.locator(".agy-chatrow", { hasText: "Test convo" }).count() === 1, "…and the hand-written chats are still visible above it", failures);
+  await page.screenshot({ path: path.join(SHOTS, "allchats-folded.png") });
+
+  // rows are built lazily on expand and only HIDDEN on re-collapse, so visibility
+  // — not DOM presence — is what the toggle assertions have to look at
+  const shownRows = (loc) => loc.locator(".agy-chatrow:visible").count();
+  await noiseHead.click();
+  await page.waitForFunction(() => document.querySelectorAll(".agy-chatgroup-head.clickable ~ .agy-cardlist .agy-chatrow").length === 6, null, { timeout: 8000 });
+  fx.assert(await shownRows(noiseGroup) === 6, "clicking the group expands all 6 chats", failures);
+  await noiseHead.click();
+  fx.assert(await shownRows(noiseGroup) === 0, "…and clicking again folds it back", failures);
+
+  // searching narrows the fold to matches and keeps the control usable
+  await page.fill(".agy-search", "commit run 3");
+  await page.waitForFunction(() => /1 MATCH/.test(document.querySelector(".agy-chatgroup-head.clickable")?.textContent || ""), null, { timeout: 8000 });
+  fx.assert(/1 MATCH/.test(await noiseGroup.locator(".agy-chatgroup-head").textContent()), "the fold counts matches, not the whole cluster, while searching", failures);
+  await noiseHead.click();
+  await page.waitForFunction(() => document.querySelectorAll(".agy-chatrow:not([style*='none'])").length >= 1, null, { timeout: 8000 });
+  fx.assert(await shownRows(noiseGroup) === 1, "…and the matching chat is one click away", failures);
+  await noiseHead.click(); // back to folded, so the state below is unambiguous
+
+  // full-text matches fold too — this section floods harder than the list above,
+  // because a content query hits the identical prompt in every single run
+  await page.fill(".agy-search", "Conventional Commits");
+  await page.waitForSelector(".agy-sub-note:has-text('FOUND INSIDE')", { timeout: 12000 });
+  const found = page.locator(".agy-chatgroup", { has: page.locator(".agy-chatgroup-head", { hasText: "REPEATED PROMPT" }) }).last();
+  fx.assert(/FOUND INSIDE 6 MORE CONVERSATIONS/.test(await page.locator(".agy-sub-note").first().textContent()), "content search still reports the true total", failures);
+  fx.assert(/REPEATED PROMPT · 6 MATCHES/.test(await found.locator(".agy-chatgroup-head").textContent()), "…but renders them as one folded group, not 6 rows", failures);
+  fx.assert(await shownRows(found) === 0, "…collapsed, so the fold survives a content search", failures);
+  await page.fill(".agy-search", "");
+  await page.waitForSelector(".agy-chatgroup-head.clickable", { timeout: 8000 });
+  fx.assert(await shownRows(noiseGroup) === 0, "the cluster is folded again once the search clears", failures);
+
   await recovered.click();
   await page.waitForSelector(".agy-msg-user", { timeout: 8000 });
   fx.assert(/hello agy/.test(await page.locator(".agy-msg-user").textContent()), "a recovered conversation opens with its transcript", failures);
