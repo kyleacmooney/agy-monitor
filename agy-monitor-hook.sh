@@ -1,7 +1,9 @@
 #!/bin/bash
 # agy-monitor hook — observe-only. Installed globally in ~/.gemini/config/hooks.json
 # on every lifecycle event; records the latest event for a conversation into a
-# status file the monitor reads, then ALWAYS replies allow so agy is never altered.
+# status file the monitor reads, then replies in a way that never alters agy:
+# `allow` on PreToolUse (the only event carrying a decision) and an empty
+# no-opinion `{}` on every other event.
 #
 #   usage (from hooks.json):  agy-monitor-hook.sh <EventName>
 #
@@ -40,12 +42,19 @@ if [ -n "$AGY_MONITOR_GATED" ] && [ "$EVENT" = "PreToolUse" ]; then
   exit 0
 fi
 
-# Ungated sessions (your real terminals) are pure observe-only: always allow, never gate.
+# Ungated sessions (your real terminals) are pure observe-only: never gate.
 #
-# Only PreToolUse has a "decision" field. agy parses every hook's stdout as a
-# per-event proto, so printing {"decision":"allow"} on PreInvocation/PostToolUse/
-# PostInvocation/Stop makes it log `unknown field "decision"` on every single tool
-# call. An empty object is the no-opinion reply for those.
+# agy parses each hook's stdout as THAT EVENT'S proto, and PreToolUse is the event
+# whose proto we actually need a field from. Replying {"decision":"allow"} to the
+# others made agy log, 112 times in the logs on this machine:
+#
+#   failed to unmarshal result from hook jsonhook__agy-monitor_PostToolUse_0_0
+#   via protojson: {"decision":"allow"}: proto: (line 1:2): unknown field "decision"
+#
+# observed for PreInvocation, PostToolUse and PostInvocation. An empty object is the
+# no-opinion reply every event accepts, so it is used for all of them — including
+# Stop and Notification, which were never seen to complain but have no decision to
+# express either.
 if [ "$EVENT" = "PreToolUse" ]; then
   echo '{"decision":"allow"}'
 else

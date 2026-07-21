@@ -336,9 +336,10 @@ async function main() {
     assert.deepStrictEqual(JSON.parse(runHook("PreToolUse", { HOME: d, AGY_MONITOR_GATED: "1" }, denyPayload, d)),
       { decision: "deny", reason: "agy-monitor gate unavailable" });
   });
-  // Only PreToolUse is gated — and only PreToolUse HAS a "decision" field. agy parses
-  // each hook's stdout as that event's proto, so replying {"decision":"allow"} to a
-  // Stop/PostToolUse/PreInvocation makes it log `unknown field "decision"` every time.
+  // Only PreToolUse is gated, and it is the only event whose proto we need a field
+  // from. agy parses each hook's stdout as that event's proto, and replying
+  // {"decision":"allow"} to PreInvocation/PostToolUse/PostInvocation made it log
+  // `unknown field "decision"` every time (112 occurrences in the local logs).
   await test("GATED non-PreToolUse event → ungated no-opinion {} (never a decision)", () => {
     const d = mkHookDir(null);
     assert.deepStrictEqual(JSON.parse(runHook("Stop", { HOME: d, AGY_MONITOR_GATED: "1" }, denyPayload, d)), {});

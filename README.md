@@ -165,7 +165,7 @@ Always bind to loopback. To reach the console from another device, front it with
 
 - **Loopback-only by default.** The server binds `127.0.0.1`; remote exposure is an explicit tunnel-plus-token decision, never automatic.
 - **Bearer token.** With `AGY_MONITOR_TOKEN` set, every `/api` call needs it (checked in constant time); `/api/health` stays open for probes.
-- **Observe-only hook.** The live-state hook only reads the event payload and writes a status file — it always returns `allow` and never influences `agy`'s decisions.
+- **Observe-only hook.** The live-state hook only reads the event payload and writes a status file. It never influences `agy`'s decisions: `PreToolUse` — the one event with a `decision` field — always gets `allow`, and every other event gets an empty no-opinion `{}`.
 - **The gate fails closed.** Any abnormal path — timeout, parse error, missing data — resolves to *manual approval*, never auto-allow. The classifier is sandboxed against recursion (it can never spawn a gated child of itself).
 - **One-click approvals, human-gated safelist.** Nothing is added to your safelist automatically; the promoter only ever *suggests* minimal prefixes, and never a bare binary or a deny-class command.
 - **Backups before writes.** Hook and settings changes back up the original file first.
