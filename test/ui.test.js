@@ -512,6 +512,59 @@ const SHOTS = path.join(__dirname, "shots");
   fx.assert((await page.inputValue(".agy-nc-ta")) === "draft: refactor the parser", "unsent new-chat draft survives a reload", failures);
   await page.evaluate(() => { try { localStorage.removeItem("agy-newchat-draft"); } catch {} });
 
+  // WORKSPACE combobox is keyboard-navigable: ↑/↓ move, Enter takes, Esc closes — and
+  // ↑/↓ must NOT steal the caret when there is no list to move through (this field
+  // exists to edit long absolute paths).
+  await page.goto(base + "/?new=");
+  await page.waitForSelector(".agy-ws-input", { timeout: 8000 });
+  await page.fill(".agy-ws-input", "");
+  await page.click(".agy-ws-input");
+  await page.waitForSelector(".agy-ws-opt", { timeout: 8000 });
+  const nOpts = await page.locator(".agy-ws-opt").count();
+  const selIdx = () => page.evaluate(() =>
+    Array.from(document.querySelectorAll(".agy-ws-opt")).findIndex((o) => o.classList.contains("sel")));
+  const menuOpen = () => page.evaluate(() => document.querySelector(".agy-ws-menu").style.display !== "none");
+
+  fx.assert((await selIdx()) === -1, "ws menu opens with nothing selected", failures);
+  await page.keyboard.press("ArrowDown");
+  fx.assert((await selIdx()) === 0, "ArrowDown selects the first workspace", failures);
+  await page.keyboard.press("ArrowDown");
+  // past the last row it wraps back to -1 (the typed text), so with a single-row fixture
+  // one more ArrowDown lands there rather than on row 1.
+  fx.assert((await selIdx()) === (nOpts > 1 ? 1 : -1), "ArrowDown advances, wrapping past the last row", failures);
+  await page.keyboard.press("ArrowUp");
+  fx.assert((await selIdx()) === (nOpts > 1 ? 0 : nOpts - 1), "ArrowUp walks the selection back", failures);
+  while ((await selIdx()) !== -1) await page.keyboard.press("ArrowUp");
+  fx.assert((await selIdx()) === -1, "ArrowUp past the top returns to the typed text", failures);
+
+  await page.keyboard.press("ArrowDown"); // back onto row 0
+  const row0 = await page.locator(".agy-ws-opt .p").first().innerText();
+  await page.keyboard.press("Enter");
+  fx.assert(!(await menuOpen()), "Enter closes the workspace menu", failures);
+  fx.assert((await page.inputValue(".agy-ws-input")).length > 0, "Enter fills the workspace from the selection", failures);
+  fx.assert((await page.evaluate(() => document.activeElement.className)).includes("agy-nc-ta"),
+    "Enter moves focus on to the message box", failures);
+  fx.assert((await page.evaluate(() => location.search + location.hash)).includes("new"),
+    "Enter does not submit the form or navigate away", failures);
+  fx.assert(row0.length > 0, "workspace rows render a path", failures);
+
+  // Escape closes the menu without leaving the page…
+  await page.click(".agy-ws-input");
+  await page.waitForTimeout(120);
+  await page.keyboard.press("Escape");
+  fx.assert(!(await menuOpen()), "Escape closes the workspace menu", failures);
+  fx.assert((await page.evaluate(() => !!document.querySelector(".agy-ws-input"))),
+    "Escape leaves you on the new-chat form", failures);
+
+  // …and with no matches, ↑/↓ stay out of the way of caret movement.
+  await page.fill(".agy-ws-input", "zzz-no-such-workspace-zzz");
+  await page.waitForTimeout(120);
+  fx.assert(!(await menuOpen()), "no matches → no menu", failures);
+  await page.keyboard.press("ArrowUp"); // native: caret to start
+  const caret = await page.evaluate(() => document.querySelector(".agy-ws-input").selectionStart);
+  fx.assert(caret === 0, "ArrowUp keeps native caret movement when there is no list", failures);
+  await page.evaluate(() => { try { localStorage.removeItem("agy-newchat-draft"); } catch {} });
+
   // approval card clears INSTANTLY on Approve — optimistically, before the answer
   // request even resolves, not on the next server poll. Hold the answer response
   // open so only the optimistic path can remove the card.

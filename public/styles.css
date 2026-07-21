@@ -1079,7 +1079,8 @@ summary { list-style: none; }
   overflow: hidden; max-height: 300px; overflow-y: auto;
 }
 .agy-ws-opt { padding: 8px 11px; cursor: pointer; display: flex; flex-direction: column; gap: 1px; }
-.agy-ws-opt:hover { background: rgba(226,163,61,0.09); }
+.agy-ws-opt:hover, .agy-ws-opt.sel { background: rgba(226,163,61,0.09); }
+.agy-ws-opt.sel { box-shadow: inset 2px 0 0 var(--amber); }
 .agy-ws-opt .n { font-size: 12.5px; font-weight: 600; }
 .agy-ws-opt .p { font: 400 10.5px var(--mono); color: var(--faint); }
 .agy-nc-ta {

@@ -3270,23 +3270,64 @@ function renderAgyMonitor(tool) {
     let allWorkspaces = [];
     const wsInput = el("input", { class: "agy-ws-input", type: "text", placeholder: "type a folder path, or pick a recent workspace…", value: ctx.workspace || draft.workspace || "" });
     const wsMenu = el("div", { class: "agy-ws-menu", style: { display: "none" } });
+    // Keyboard-navigable combobox: ↑/↓ move the selection, Enter takes it, Esc closes.
+    // `wsSel` is an index into `wsShown` (what's actually on screen right now), and -1
+    // means "nothing selected — Enter should accept whatever I typed".
+    let wsShown = [], wsSel = -1;
+    function paintSel() {
+      const opts = wsMenu.children;
+      for (let i = 0; i < opts.length; i++) opts[i].classList.toggle("sel", i === wsSel);
+      if (wsSel >= 0 && opts[wsSel] && opts[wsSel].scrollIntoView) opts[wsSel].scrollIntoView({ block: "nearest" });
+    }
+    function pickWs(w) {
+      wsInput.value = w.workspace;
+      wsMenu.style.display = "none"; wsSel = -1;
+      saveDraft(); ta.focus();
+    }
     function renderMenu() {
       const q = (wsInput.value || "").trim().toLowerCase();
-      const matches = allWorkspaces.filter((w) => !q || w.workspace.toLowerCase().includes(q) || (w.project || "").toLowerCase().includes(q)).slice(0, 14);
+      wsShown = allWorkspaces.filter((w) => !q || w.workspace.toLowerCase().includes(q) || (w.project || "").toLowerCase().includes(q)).slice(0, 14);
       clear(wsMenu);
-      if (!matches.length) { wsMenu.style.display = "none"; return; }
-      for (const w of matches) {
-        wsMenu.appendChild(el("div", { class: "agy-ws-opt", onmousedown: (e) => { e.preventDefault(); wsInput.value = w.workspace; wsMenu.style.display = "none"; ta.focus(); } }, [
+      if (!wsShown.length) { wsMenu.style.display = "none"; wsSel = -1; return; }
+      // Typing re-filters, so an index into the old list is meaningless — start over.
+      if (wsSel >= wsShown.length) wsSel = wsShown.length - 1;
+      for (const w of wsShown) {
+        wsMenu.appendChild(el("div", { class: "agy-ws-opt", onmousedown: (e) => { e.preventDefault(); pickWs(w); } }, [
           el("span", { class: "n", text: w.project || w.shortWorkspace }),
           el("span", { class: "p", text: w.shortWorkspace }),
         ]));
       }
       wsMenu.style.display = "";
+      paintSel();
     }
     wsInput.addEventListener("focus", renderMenu);
-    wsInput.addEventListener("input", renderMenu);
+    wsInput.addEventListener("input", () => { wsSel = -1; renderMenu(); });
     wsInput.addEventListener("input", saveDraft);
-    wsInput.addEventListener("blur", () => setTimeout(() => { wsMenu.style.display = "none"; }, 150));
+    wsInput.addEventListener("blur", () => setTimeout(() => { wsMenu.style.display = "none"; wsSel = -1; }, 150));
+    wsInput.addEventListener("keydown", (e) => {
+      const open = wsMenu.style.display !== "none" && wsShown.length;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        // Only swallow the key once we know there is a list to move through — otherwise
+        // ↑/↓ must keep their native caret-to-start / caret-to-end behaviour, which is
+        // how you edit a long absolute path.
+        if (!open) { renderMenu(); if (!wsShown.length) return; }
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        // Wrap, counting -1 (the typed text) as a stop so you can always get back to it.
+        wsSel = wsSel + step;
+        if (wsSel >= wsShown.length) wsSel = -1;
+        else if (wsSel < -1) wsSel = wsShown.length - 1;
+        paintSel();
+        return;
+      }
+      if (e.key === "Enter") {
+        if (open && wsSel >= 0) { e.preventDefault(); pickWs(wsShown[wsSel]); return; }
+        // Nothing highlighted: keep the typed path and move on to the message box.
+        e.preventDefault(); wsMenu.style.display = "none"; ta.focus();
+        return;
+      }
+      if (e.key === "Escape" && open) { e.preventDefault(); e.stopPropagation(); wsMenu.style.display = "none"; wsSel = -1; }
+    });
     page.appendChild(el("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } }, [
       el("span", { class: "agy-field-label", text: "WORKSPACE" }),
       el("div", { class: "agy-ws-wrap" }, [wsInput, wsMenu]),
