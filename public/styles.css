@@ -983,6 +983,11 @@ summary { list-style: none; }
 .agy-chatgroup-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 0 2px; }
 .agy-chatgroup-head .n { font: 600 10px var(--mono); letter-spacing: 0.12em; color: var(--faint); text-transform: uppercase; flex-shrink: 0; }
 .agy-chatgroup-head .p { font: 400 10px var(--mono); color: var(--dis); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* folded "repeated prompt" group: chevron + label read left-to-right, not spread apart */
+.agy-chatgroup-head .chev { font: 400 9px var(--mono); color: var(--dis); width: 9px; flex-shrink: 0; }
+.agy-chatgroup-head.clickable { cursor: pointer; justify-content: flex-start; gap: 8px; }
+.agy-chatgroup-head.clickable .p { flex: 1; }
+.agy-chatgroup-head.clickable:hover .n, .agy-chatgroup-head.clickable:hover .chev { color: var(--text); }
 .agy-chatrow { display: flex; align-items: center; gap: 12px; padding: 9px 14px; border-bottom: 1px solid var(--hair05); cursor: pointer; }
 .agy-chatrow:hover { background: var(--menu); }
 .agy-chatrow .mid { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }

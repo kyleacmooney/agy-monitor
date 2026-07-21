@@ -20,11 +20,15 @@ function makeRoots(prefix) {
   return { base, monRoot, agyHome };
 }
 
-function writeConversation(agyHome, { cid = CID, workspace = "/tmp/ws", title = "Test convo", askTail = false, indexed = true } = {}) {
+// `prompt` sets the opening user turn (noise-clustering keys on it); `padBytes`
+// pads that turn's payload so the record exceeds a chunked reader's window — the
+// real shape of a commit-message helper that ships a whole diff in one JSON line.
+function writeConversation(agyHome, { cid = CID, workspace = "/tmp/ws", title = "Test convo", askTail = false, indexed = true, prompt = "hello agy", padBytes = 0 } = {}) {
   const logs = path.join(agyHome, "brain", cid, ".system_generated", "logs");
   fs.mkdirSync(logs, { recursive: true });
+  const body = prompt + (padBytes ? "\n" + "d".repeat(padBytes) : "");
   const rows = [
-    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-07-01T12:00:00Z", content: "<USER_REQUEST> hello agy </USER_REQUEST>" },
+    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-07-01T12:00:00Z", content: "<USER_REQUEST> " + body + " </USER_REQUEST>" },
     { step_index: 1, source: "SYSTEM", type: "CONVERSATION_HISTORY", status: "DONE", created_at: "2026-07-01T12:00:00Z", content: "internal" },
     { step_index: 2, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: "2026-07-01T12:00:05Z", content: "Hi there — **all good**.", thinking: "the user greets me" },
   ];
