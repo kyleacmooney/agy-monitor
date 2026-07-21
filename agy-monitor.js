@@ -188,26 +188,74 @@ function usageOf(rowBuf) {
   return scal;
 }
 
-const _costCache = new Map(); // db path -> { mtimeMs, model, result }
+// Read-only query against one of agy's conversation DBs.
+//
+// This used to open `file:<db>?immutable=1`. That flag promises sqlite the file
+// cannot change, so it skips the -wal entirely — a lie for a LIVE conversation,
+// where agy leaves an uncheckpointed -wal holding the recent writes. It fails in
+// BOTH directions, and the silent one is worse: on this machine, of five live dbs
+// with a -wal, three raised "database disk image is malformed" and two returned a
+// stale-but-plausible row count (0 and 1 where the truth was 1 and 2). Since the
+// -wal absorbs the writes the .db mtime often doesn't move either, so a wrong
+// answer got cached under a key that never changed.
+//
+// `?mode=ro` is a genuine read-only connection: it reads the -wal and reports the
+// same rows agy itself sees, copies nothing, and so has no window in which agy could
+// checkpoint mid-read and hand us a torn snapshot.
+//
+// But it cannot replace immutable outright, because these dbs are in WAL journal
+// mode and SQLITE CANNOT OPEN A WAL DATABASE READ-ONLY WITHOUT AN EXISTING -shm: with
+// no -wal alongside it, `?mode=ro` fails "unable to open database file (14)" on every
+// one of them. That is most of the directory — the dbs of conversations that ended.
+//
+// So the two are split by the only thing that distinguishes them, and each is used
+// exactly where it is correct:
+//   -wal present → mode=ro    (the live case; immutable would skip the wal)
+//   no -wal      → immutable  (nothing to skip, and mode=ro can't open it at all)
+//
+// The no-wal side falls back to mode=ro if immutable errors, since neither can be
+// silently wrong there. The wal side deliberately does NOT fall back to immutable:
+// that is precisely the read that returns stale-but-plausible numbers, and a missing
+// cost is far better than a confidently wrong one.
+function sqliteQuery(db, sql) {
+  const run = (q) => execFileSync("sqlite3", ["file:" + db + q, sql],
+    { timeout: 5000, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }).toString();
+  let walSize = 0;
+  try { walSize = fs.statSync(db + "-wal").size; } catch {}
+  if (walSize) return run("?mode=ro");
+  try { return run("?immutable=1"); }
+  catch (e) {
+    try { return run("?mode=ro"); } catch { throw e; } // report the primary failure
+  }
+}
+
+const _costCache = new Map(); // db path -> { key, model, result }
 function conversationCost(conversationId, model) {
   if (!isSafeConversationId(conversationId)) return null;
   const db = path.join(AGY_DIR, "conversations", conversationId + ".db");
-  let mtimeMs;
-  try { mtimeMs = fs.statSync(db).mtimeMs; } catch { return null; }
+  let key;
+  try {
+    const st = fs.statSync(db);
+    // A live conversation's writes land in the -wal, leaving the .db mtime frozen —
+    // so the cache key has to cover the -wal too or we'd serve a stale cost forever.
+    let w = "";
+    try { const ws = fs.statSync(db + "-wal"); w = ws.size + ":" + ws.mtimeMs; } catch {}
+    key = st.mtimeMs + ":" + st.size + ":" + w;
+  } catch { return null; }
   const cached = _costCache.get(db);
-  if (cached && cached.mtimeMs === mtimeMs && cached.model === model) return cached.result;
+  if (cached && cached.key === key && cached.model === model) return cached.result;
 
   let hex;
   try {
-    hex = execFileSync("sqlite3", ["file:" + db + "?immutable=1", "SELECT idx||':'||hex(data) FROM gen_metadata ORDER BY idx;"],
-      { timeout: 5000, maxBuffer: 64 * 1024 * 1024, stdio: ["pipe", "pipe", "pipe"] }).toString();
+    hex = sqliteQuery(db, "SELECT idx||':'||hex(data) FROM gen_metadata ORDER BY idx;");
   } catch (e) {
     // A permanently malformed db (there is one on this machine) would otherwise
     // re-fork sqlite3 on every call forever — and leak its stderr into our log.
     // Pin ONLY when the db itself is the problem: a transient fork/timeout must
     // stay retryable, or one blip hides a real cost until the process restarts.
+    // The pin is keyed to this exact db+wal state, so the next write retries.
     const why = String((e && e.stderr) || (e && e.message) || "");
-    if (/malformed|not a database|file is encrypted|no such table/i.test(why)) _costCache.set(db, { mtimeMs, model, result: null });
+    if (/malformed|not a database|file is encrypted|no such table/i.test(why)) _costCache.set(db, { key, model, result: null });
     return null;
   }
 
@@ -227,7 +275,7 @@ function conversationCost(conversationId, model) {
     costUsd += (f2 * (hi ? P.inHi : P.in) + f5 * (hi ? P.cachedHi : P.cached) + out * (hi ? P.outHi : P.out)) / 1e6;
   }
   const result = turns ? { costUsd, tokens: { uncachedInput, cached: cachedTok, output }, turns } : null;
-  _costCache.set(db, { mtimeMs, model, result });
+  _costCache.set(db, { key, model, result });
   return result;
 }
 
