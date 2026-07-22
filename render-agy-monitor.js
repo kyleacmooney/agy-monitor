@@ -1455,11 +1455,17 @@ function renderAgyMonitor(tool) {
   function diffCard(tc, opts) {
     const lines = (tc.content || "").split("\n");
     if (lines.length && lines[lines.length - 1] === "") lines.pop();
-    return el("details", { class: "agy-diffcard", "data-k": opts && opts.key, open: opts && opts.compact ? null : "" }, [
+    // Same evidence contract as toolCard: the server proved the named tool call was
+    // escaped/denied at agy's prompt, so a write that never happened must not dress
+    // as a completed edit. The body stays visible — it is the PROPOSED content, and
+    // seeing what was about to be written is exactly why you'd open this card.
+    const cancelled = !tc._result && !(opts && opts.compact) && opts && opts.cancelled === tc.name;
+    return el("details", { class: "agy-diffcard" + (cancelled ? " cancelled" : ""), "data-k": opts && opts.key, open: opts && opts.compact ? null : "" }, [
       el("summary", {}, [
-        el("span", { class: "glyph", text: "✎" }),
+        el("span", { class: "glyph" + (cancelled ? " cancelled" : ""), text: cancelled ? "⊘" : "✎" }),
         el("span", { class: "tname", text: tc.overwrite ? "edit file" : "write file" }),
         el("span", { class: "tsum", text: tc.summary || (tc.file ? tc.file.split("/").pop() : "") }),
+        cancelled ? el("span", { class: "tstat", text: "cancelled — not written" }) : null,
         el("span", {
           class: "agy-panelbtn", text: "◨ panel", title: "open in workspace panel",
           onclick: (e) => { e.preventDefault(); e.stopPropagation(); if (!P.rightOpen) toggleRight(); S.rightTab = "turn"; renderPanel(); },
@@ -1683,7 +1689,7 @@ function renderAgyMonitor(tool) {
       }
       (m.toolCalls || []).forEach((tc, j) => {
         const key = "tool:" + i + ":" + j;
-        if (tc.name === "write_to_file" && tc.content != null) kids.push(diffCard(tc, { key, compact: opts.compact }));
+        if (tc.name === "write_to_file" && tc.content != null) kids.push(diffCard(tc, { key, compact: opts.compact, cancelled: opts.isLast && opts.cancelled }));
         else kids.push(toolCard(tc, { key, openFile, maybeRunning: opts.isLast && opts.live, awaiting: opts.isLast && opts.awaiting, cancelled: opts.isLast && opts.cancelled, compact: opts.compact }));
       });
       return el("div", { class: "agy-turn" }, [el("div", { class: "agy-msg-agy" }, kids)]);
@@ -2295,7 +2301,9 @@ function renderAgyMonitor(tool) {
       if (pendingEl) { try { viewEl.removeChild(pendingEl); } catch {} pendingEl = null; }
       let changed = false;
       for (let i = 0; i < msgs.length; i++) {
-        const sig = msgSig(msgs[i]) + askSig(msgs[i]) + (i === msgs.length - 1 ? (live ? (awaiting ? ":await" : ":live") : cancelled ? ":cancel" : "") : "");
+        // the cancel term carries the NAME: if a later escape names a different tool
+        // while the last message is otherwise unchanged, the card set must re-render
+        const sig = msgSig(msgs[i]) + askSig(msgs[i]) + (i === msgs.length - 1 ? (live ? (awaiting ? ":await" : ":live") : cancelled ? ":cancel:" + cancelled : "") : "");
         const opts = { openFile, isLast: i === msgs.length - 1, live, awaiting, cancelled, cid: full.conversationId, sendAnswer, forkFrom: (ts) => forkNow(ts) };
         if (i >= rows.length) {
           const fresh = messageEl(msgs[i], i, opts);
@@ -2931,7 +2939,9 @@ function renderAgyMonitor(tool) {
     let rules = [], rulesPath = "", cands = [], decs = [];
     let phase = "loading";   // "loading" | "ready"
     let rulesOk = false;     // false ⇒ never claim the safelist is empty
-    let errMsg = "";
+    let errMsg = "";         // rules-section failure — about the SAFELIST only
+    let candErr = "", decErr = ""; // each section owns its failure; a dead decision
+                                   // log must not read as "couldn't read the safelist"
     let usesKnown = false;   // false ⇒ no safelist-allow rows at all; 0 means "no data", not "dead"
     let logSpans = false;    // false ⇒ the log is younger than the window; never claim "unused"
     let usesDays = 30;
@@ -2947,9 +2957,12 @@ function renderAgyMonitor(tool) {
         else if (!res.ok) shell.toast(res.message || "that didn't work");
         else if (res.alreadyAllowed) shell.toast(res.message || "already covered by the safelist");
       }
-      // a successful mutation elsewhere makes the old offer stale; a FAILED one changed
-      // nothing, so the way back must survive it
-      if (res && res.ok) undo = null;
+      // The undo offer deliberately SURVIVES these actions. Snooze/Never only touch
+      // the candidate list, and even a promote of some other atom doesn't invalidate
+      // putting the removed rule back (restoreRule answers "already covered"
+      // gracefully if it did). The offer ends only when it's used, dismissed, or
+      // replaced by a newer demote — anything else silently destroys the one route
+      // back from a removal.
       load();
     }
     async function demote(rule) {
@@ -2994,11 +3007,14 @@ function renderAgyMonitor(tool) {
       const df = decs.filter((d) => !q || ((d.command || "") + " " + (d.reason || "") + " " +
         (d.decision || d.disposition || "") + " " + (d.outcome || d.stage || "")).toLowerCase().includes(q));
 
-      // a filtered count in the section label would read as "you have 0 rules"
+      // a filtered count in the section label would read as "you have 0 rules" — and a
+      // count for a section that FAILED to load would read as "0 exist" beside its own
+      // error message, so a failed section reports "?" instead of a made-up zero
       sumLine.style.display = q ? "" : "none";
       sumLine.textContent = q
-        ? rf.length + "/" + rules.length + " rules · " + cf.length + "/" + cands.length +
-          " candidates · " + df.length + "/" + decs.length + " decisions"
+        ? (rulesOk ? rf.length + "/" + rules.length : "?/?") + " rules · " +
+          (candErr ? "?/?" : cf.length + "/" + cands.length) + " candidates · " +
+          (decErr ? "?/?" : df.length + "/" + decs.length) + " decisions"
         : "";
 
       clear(ruleSec); clear(candSec); clear(decSec);
@@ -3006,7 +3022,9 @@ function renderAgyMonitor(tool) {
 
       // ---- 1. current safelist ----
       ruleSec.appendChild(head(
-        "CURRENT SAFELIST — AUTO-APPROVED" + (loading ? "" : " · " + rf.length),
+        // same guard the other two section headers carry: "· 0" above an error message
+        // is a false "zero rules, everything asks" claim, not a count
+        "CURRENT SAFELIST — AUTO-APPROVED" + (loading || !rulesOk ? "" : " · " + rf.length),
         rulesPath ? el("span", { class: "agy-sl-path", text: shortHome(rulesPath), title: rulesPath }) : null,
       ));
       if (errMsg) ruleSec.appendChild(el("div", { class: "agy-sl-err", text: errMsg }));
@@ -3085,8 +3103,9 @@ function renderAgyMonitor(tool) {
       }
 
       // ---- 2. candidates ----
-      candSec.appendChild(head("CANDIDATES — REPEATEDLY APPROVED, NOT YET SAFELISTED" + (loading ? "" : " · " + cf.length)));
-      if (!loading) {
+      candSec.appendChild(head("CANDIDATES — REPEATEDLY APPROVED, NOT YET SAFELISTED" + (loading || candErr ? "" : " · " + cf.length)));
+      if (candErr) candSec.appendChild(el("div", { class: "agy-sl-err", text: candErr }));
+      if (!loading && !candErr) {
         if (!cf.length) candSec.appendChild(quiet(q ? "No candidates match." : "Nothing to review — approve some gated commands first."));
         for (const c of cf) {
           candSec.appendChild(el("div", { class: "agy-cand" }, [
@@ -3110,10 +3129,11 @@ function renderAgyMonitor(tool) {
 
       // ---- 3. decisions ----
       decSec.appendChild(head(
-        "RECENT GATE DECISIONS · 7D" + (loading ? "" : " · " + df.length),
+        "RECENT GATE DECISIONS · 7D" + (loading || decErr ? "" : " · " + df.length),
         df.length > 50 ? el("span", { class: "agy-sl-sum", text: "SHOWING 50" }) : null,
       ));
-      if (!loading) {
+      if (decErr) decSec.appendChild(el("div", { class: "agy-sl-err", text: decErr }));
+      if (!loading && !decErr) {
         if (!df.length) {
           decSec.appendChild(quiet(q ? "No decisions match." : "No gated commands yet."));
         } else {
@@ -3148,9 +3168,12 @@ function renderAgyMonitor(tool) {
           runTool(tool.id, { action: "list-decisions", days: 7 }),
         ]);
       } catch {
-        // was a bare `return`, which left the page permanently blank
+        // was a bare `return`, which left the page permanently blank. Every section
+        // failed, so every section says so — "Nothing to review" from a dead backend
+        // is as false a claim as "the safelist is empty".
         phase = "ready"; rulesOk = false;
         errMsg = "couldn't reach the monitor backend — this is not a claim that the safelist is empty.";
+        candErr = decErr = "couldn't reach the monitor backend";
         draw(); return;
       }
       rulesOk = !!(rres && rres.ok);
@@ -3162,11 +3185,12 @@ function renderAgyMonitor(tool) {
       cands = (cres && cres.ok && cres.candidates) || [];
       decs = (dres && dres.ok && dres.decisions) || [];
       // a dead promoter module returns {ok:false}; that used to render as
-      // "The safelist is empty — every command asks", a false safety claim
-      const fail = !rulesOk
-        ? ((rres && rres.message) || "couldn't read permissions.allow")
-        : ((cres && cres.ok === false && cres.message) || (dres && dres.ok === false && dres.message) || "");
-      errMsg = fail ? "couldn't read the safelist — " + fail : "";
+      // "The safelist is empty — every command asks", a false safety claim.
+      // Each failure lands in ITS OWN section — a dead decision log next to a
+      // perfectly readable rule list must not be reported as a safelist problem.
+      errMsg = !rulesOk ? "couldn't read the safelist — " + ((rres && rres.message) || "couldn't read permissions.allow") : "";
+      candErr = cres && cres.ok === false ? "couldn't read the candidates — " + (cres.message || "unknown error") : "";
+      decErr = dres && dres.ok === false ? "couldn't read the gate decisions — " + (dres.message || "unknown error") : "";
       phase = "ready";
       draw();
     }

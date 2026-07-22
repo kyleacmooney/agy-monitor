@@ -432,12 +432,52 @@ const SHOTS = path.join(__dirname, "shots");
   fx.assert((await page.locator('.agy-rule[data-rule="command(git log)"] .pat').textContent()).trim() === "git log", "chip shows the bare prefix, not command(...)", failures);
   fx.assert((await page.locator('.agy-rule.k-inert[data-rule="mcp__playwright__browser_click"] .pat').textContent()).trim() === "mcp__playwright__browser_click", "non-command rules render verbatim", failures);
   fx.assert(/not applied/i.test(await page.locator(".agy-rule.k-inert").textContent()), "non-command rules are marked not-applied", failures);
+  // a fake candidate rides along so the undo-survival check below has a Snooze to click
+  await page.route("**/api/run", async (route) => {
+    const pd = route.request().postDataJSON();
+    if (pd && pd.action === "list-safelist-candidates") {
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+        ok: true, candidates: [{ atom: "git status", count: 5, lastTs: Date.now(), alreadyAllowed: false, examples: ["git status"] }],
+      }) });
+    }
+    return route.continue();
+  });
   await page.locator('.agy-rule[data-rule="command(wc)"] .x').click();
   await page.waitForFunction(() => document.querySelectorAll(".agy-rule").length === 2, null, { timeout: 8000 });
   const settingsNow = JSON.parse(fs.readFileSync(process.env.AGY_GATE_SETTINGS, "utf8"));
   fx.assert(!settingsNow.permissions.allow.includes("command(wc)"), "✕ removes the rule from settings.json", failures);
   fx.assert(settingsNow.permissions.allow.includes("command(git log)"), "other rules survive the demote", failures);
   await page.screenshot({ path: path.join(SHOTS, "safelist.png") });
+
+  // demote offers a way back — and candidate-list actions must not eat it
+  await page.waitForSelector(".agy-sl-undo", { timeout: 8000 });
+  fx.assert(/removed wc/.test(await page.locator(".agy-sl-undo .t").textContent()), "undo bar names the removed rule", failures);
+  await page.click(".agy-cand .agy-ghost:has-text('Snooze')");
+  await page.waitForTimeout(600); // snooze → load() → redraw
+  fx.assert((await page.locator(".agy-sl-undo").count()) === 1, "Snooze does not destroy the undo offer (it never touched the safelist)", failures);
+  // …clicking Undo puts the exact string back and consumes the offer
+  await page.click(".agy-sl-undo button:has-text('Undo')");
+  await page.waitForFunction(() => document.querySelectorAll(".agy-rule").length === 3, null, { timeout: 8000 });
+  const settingsRestored = JSON.parse(fs.readFileSync(process.env.AGY_GATE_SETTINGS, "utf8"));
+  fx.assert(settingsRestored.permissions.allow.includes("command(wc)"), "Undo restores the demoted rule verbatim into settings.json", failures);
+  fx.assert((await page.locator(".agy-sl-undo").count()) === 0, "the undo offer is consumed by use", failures);
+  await page.unroute("**/api/run");
+
+  // a dead decision log is reported in ITS section — not as a safelist problem
+  await page.route("**/api/run", async (route) => {
+    const pd = route.request().postDataJSON();
+    if (pd && pd.action === "list-decisions") {
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: false, message: "decision log unreadable" }) });
+    }
+    return route.continue();
+  });
+  await page.reload();
+  await page.waitForSelector(".agy-rule", { timeout: 8000 });
+  fx.assert(/couldn't read the gate decisions/.test(await page.locator("[data-sec=decisions]").textContent()),
+    "a decisions failure lands in the decisions section", failures);
+  fx.assert(!/couldn't read the safelist/.test(await page.locator("[data-sec=rules]").textContent()),
+    "…and is NOT misreported as a safelist failure next to a healthy rule list", failures);
+  await page.unroute("**/api/run");
 
   // onboarding: hook not installed in this world → banner on the overview,
   // setup view lists the checks, one-click install writes fixture hooks.json
@@ -537,12 +577,20 @@ const SHOTS = path.join(__dirname, "shots");
   // WORKSPACE combobox is keyboard-navigable: ↑/↓ move, Enter takes, Esc closes — and
   // ↑/↓ must NOT steal the caret when there is no list to move through (this field
   // exists to edit long absolute paths).
+  //
+  // Three KNOWN workspaces are seeded here, not inherited from the fixture world: the
+  // menu used to have exactly one row (leaked from the agy stub's $PWD), which made
+  // every multi-row stepping assertion collapse into its single-row fallback — a
+  // broken `wsSel + step` passed the suite. Typing the seeded prefix filters the menu
+  // to exactly these three, whatever else leaks in.
+  fs.writeFileSync(path.join(roots.agyHome, "cache", "last_conversations.json"), JSON.stringify({
+    "/Users/fxws/alpha": {}, "/Users/fxws/beta": {}, "/Users/fxws/gamma": {},
+  }));
   await page.goto(base + "/?new=");
   await page.waitForSelector(".agy-ws-input", { timeout: 8000 });
-  await page.fill(".agy-ws-input", "");
+  await page.fill(".agy-ws-input", "fxws");
   await page.click(".agy-ws-input");
-  await page.waitForSelector(".agy-ws-opt", { timeout: 8000 });
-  const nOpts = await page.locator(".agy-ws-opt").count();
+  await page.waitForFunction(() => document.querySelectorAll(".agy-ws-opt").length === 3, null, { timeout: 8000 });
   const selIdx = () => page.evaluate(() =>
     Array.from(document.querySelectorAll(".agy-ws-opt")).findIndex((o) => o.classList.contains("sel")));
   const menuOpen = () => page.evaluate(() => document.querySelector(".agy-ws-menu").style.display !== "none");
@@ -551,19 +599,25 @@ const SHOTS = path.join(__dirname, "shots");
   await page.keyboard.press("ArrowDown");
   fx.assert((await selIdx()) === 0, "ArrowDown selects the first workspace", failures);
   await page.keyboard.press("ArrowDown");
-  // past the last row it wraps back to -1 (the typed text), so with a single-row fixture
-  // one more ArrowDown lands there rather than on row 1.
-  fx.assert((await selIdx()) === (nOpts > 1 ? 1 : -1), "ArrowDown advances, wrapping past the last row", failures);
+  fx.assert((await selIdx()) === 1, "ArrowDown advances to the second row", failures);
+  await page.keyboard.press("ArrowDown");
+  fx.assert((await selIdx()) === 2, "ArrowDown reaches the last row", failures);
+  await page.keyboard.press("ArrowDown");
+  fx.assert((await selIdx()) === -1, "ArrowDown past the last row wraps to the typed text", failures);
   await page.keyboard.press("ArrowUp");
-  fx.assert((await selIdx()) === (nOpts > 1 ? 0 : nOpts - 1), "ArrowUp walks the selection back", failures);
-  while ((await selIdx()) !== -1) await page.keyboard.press("ArrowUp");
+  fx.assert((await selIdx()) === 2, "ArrowUp from the typed text wraps to the last row", failures);
+  await page.keyboard.press("ArrowUp");
+  fx.assert((await selIdx()) === 1, "ArrowUp walks the selection back", failures);
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("ArrowUp");
   fx.assert((await selIdx()) === -1, "ArrowUp past the top returns to the typed text", failures);
 
-  await page.keyboard.press("ArrowDown"); // back onto row 0
-  const row0 = await page.locator(".agy-ws-opt .p").first().innerText();
+  await page.keyboard.press("ArrowDown"); // row 0
+  await page.keyboard.press("ArrowDown"); // row 1 — a MIDDLE row, so Enter must take
+  const row0 = await page.locator(".agy-ws-opt .p").first().innerText(); // the SELECTED one, not always row 0
   await page.keyboard.press("Enter");
   fx.assert(!(await menuOpen()), "Enter closes the workspace menu", failures);
-  fx.assert((await page.inputValue(".agy-ws-input")).length > 0, "Enter fills the workspace from the selection", failures);
+  fx.assert((await page.inputValue(".agy-ws-input")) === "/Users/fxws/beta", "Enter fills the workspace from the SELECTED row", failures);
   fx.assert((await page.evaluate(() => document.activeElement.className)).includes("agy-nc-ta"),
     "Enter moves focus on to the message box", failures);
   fx.assert((await page.evaluate(() => location.search + location.hash)).includes("new"),
@@ -615,6 +669,64 @@ const SHOTS = path.join(__dirname, "shots");
   releaseAnswer();           // let the held answer request finish
   await answerFinished;      // and fully resolve before we detach the route (avoids a fulfill/unroute race)
   await page.unroute("**/api/run");
+
+  // ⊘ CANCELLED TOOL CARDS, end to end: a REAL fake agy process (ps + lsof discovery),
+  // a frozen PreToolUse status file, and agy's own cli log proving the prompt was
+  // escaped. The transcript's dangling run_command must render ⊘ "cancelled" — and the
+  // result-less write_to_file card next to it must NOT be marked (name scoping).
+  // NO_PS is only lifted for this section; a dev's real agy sessions may appear in the
+  // sidebar meanwhile, so every assertion here is scoped to this test's own cid.
+  delete process.env.AGY_MONITOR_NO_PS;
+  const CID_ESC = "aaaaaaaa-bbbb-cccc-dddd-eeeeffff0004";
+  const ws2 = fs.realpathSync(fs.mkdtempSync(path.join(roots.base, "esc-ws-")));
+  fx.writeConversation(roots.agyHome, { cid: CID_ESC, workspace: ws2, title: "Escape test" });
+  // replace the canned transcript: one turn ending on TWO result-less tool calls
+  fs.writeFileSync(path.join(roots.agyHome, "brain", CID_ESC, ".system_generated", "logs", "transcript_full.jsonl"), [
+    { step_index: 0, source: "USER_EXPLICIT", type: "USER_INPUT", status: "DONE", created_at: "2026-07-01T12:00:00Z", content: "<USER_REQUEST> touch a file </USER_REQUEST>" },
+    { step_index: 3, source: "MODEL", type: "PLANNER_RESPONSE", status: "DONE", created_at: "2026-07-01T12:00:05Z", content: "Writing a file, then touching another.", tool_calls: [
+      { name: "write_to_file", args: { TargetFile: path.join(ws2, "x.js"), CodeContent: "const a = 1;\n", Overwrite: false } },
+      { name: "run_command", args: { CommandLine: "touch escape-test.txt", toolSummary: "touch a file" } },
+    ] },
+  ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const fakeAgy = fx.spawnFakeAgy({ agyHome: roots.agyHome, workspace: ws2, cid: CID_ESC });
+  const escT0 = Date.now();
+  const writeEsc = (tool, stepIdx, tsMs) => fs.writeFileSync(path.join(roots.monRoot, "sessions", CID_ESC + ".json"), JSON.stringify({
+    event: "PreToolUse", ts: Math.floor(tsMs / 1000), conversationId: CID_ESC,
+    payload: { stepIdx, toolCall: { name: tool, args: tool === "run_command" ? { CommandLine: "touch escape-test.txt" } : {} }, workspacePaths: [ws2] },
+  }));
+  writeEsc("run_command", 3, escT0);
+  fs.appendFileSync(fakeAgy.logPath,
+    fx.agyGlogLine(fakeAgy.pid, escT0 + 85, 'Surfacing tool confirmation: "Bash" at step 3') + "\n" +
+    fx.agyGlogLine(fakeAgy.pid, escT0 + 400, "server.go:1773] Tool confirmation for conversation " + CID_ESC + " step 3 (type=*gemini_coder_go_proto.Step_RunCommand approved=false)") + "\n" +
+    fx.agyGlogLine(fakeAgy.pid, escT0 + 600, "log_context.go:117] failed to call custom stop hook jsonhook__agy-monitor_Stop_0_0: command failed: context canceled, stderr: ") + "\n");
+  try {
+    await page.goto(base + "/?convo=" + CID_ESC);
+    await page.waitForSelector(".agy-tool", { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelector(".agy-tool .glyph.cancelled"), null, { timeout: 20000 });
+    const cancelledCard = page.locator(".agy-tool:has(.glyph.cancelled)");
+    fx.assert(/run_command/.test(await cancelledCard.textContent()), "the escaped run_command card is the one marked ⊘", failures);
+    fx.assert(/cancelled/.test(await cancelledCard.locator(".tstat").textContent()), "…and says 'cancelled', not a green ✓", failures);
+    fx.assert((await page.locator(".agy-diffcard.cancelled").count()) === 0, "the result-less write card is NOT marked — name scoping holds", failures);
+
+    // now the WRITE is the escaped call: the diff card must stop dressing as a completed edit
+    await new Promise((r) => setTimeout(r, 1600)); // a new turn's stamp lands seconds later in real life
+    const escT1 = Date.now();
+    writeEsc("write_to_file", 5, escT1);
+    fs.appendFileSync(fakeAgy.logPath,
+      fx.agyGlogLine(fakeAgy.pid, escT1 + 85, 'Surfacing tool confirmation: "WriteFile" at step 5') + "\n" +
+      fx.agyGlogLine(fakeAgy.pid, escT1 + 400, "server.go:1773] Tool confirmation for conversation " + CID_ESC + " step 5 (type=*gemini_coder_go_proto.Step_WriteFile approved=false)") + "\n" +
+      fx.agyGlogLine(fakeAgy.pid, escT1 + 600, "log_context.go:117] failed to call custom stop hook jsonhook__agy-monitor_Stop_0_0: command failed: context canceled, stderr: ") + "\n");
+    await page.reload();
+    await page.waitForFunction(() => document.querySelector(".agy-diffcard.cancelled"), null, { timeout: 20000 });
+    fx.assert(/cancelled — not written/.test(await page.locator(".agy-diffcard.cancelled .tstat").textContent()),
+      "a cancelled write renders ⊘ 'cancelled — not written', not a completed diff", failures);
+    fx.assert((await page.locator(".agy-diffcard.cancelled .glyph.cancelled").count()) === 1, "the diff card's glyph flips to ⊘", failures);
+    await page.screenshot({ path: path.join(SHOTS, "cancelled.png") });
+  } finally {
+    fakeAgy.kill();
+    process.env.AGY_MONITOR_NO_PS = "1"; // re-seal the fixture world for everything below
+    try { fs.rmSync(path.join(roots.monRoot, "sessions", CID_ESC + ".json")); } catch {}
+  }
 
   // narrow viewport: panels reconcile, no horizontal overflow
   await page.setViewportSize({ width: 390, height: 844 });

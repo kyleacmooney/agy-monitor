@@ -497,8 +497,13 @@ summary { list-style: none; }
 .agy-diffcard { border: 1px solid rgba(127,201,141,0.25); background: rgba(127,201,141,0.04); border-radius: 5px; overflow: hidden; }
 .agy-diffcard > summary { cursor: pointer; display: flex; align-items: center; gap: 9px; padding: 7px 11px; }
 .agy-diffcard .glyph { font: 500 10px var(--mono); color: var(--green); flex-shrink: 0; }
+.agy-diffcard .glyph.cancelled { color: var(--dis); }
 .agy-diffcard .tname { font: 500 11.5px var(--mono); color: var(--text); flex-shrink: 0; }
 .agy-diffcard .tsum { flex: 1; min-width: 0; font: 400 11px var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agy-diffcard .tstat { font: 400 10px var(--mono); color: var(--dis); flex-shrink: 0; }
+/* a write that never happened: the body is the PROPOSED content, so mute it rather than hide it */
+.agy-diffcard.cancelled .tname { color: var(--sec); }
+.agy-diffcard.cancelled .agy-diffcard-body { opacity: 0.55; }
 .agy-panelbtn {
   font: 400 10px var(--mono); color: var(--dis); flex-shrink: 0; padding: 1px 6px;
   border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; cursor: pointer;
