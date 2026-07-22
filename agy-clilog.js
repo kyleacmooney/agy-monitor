@@ -206,18 +206,37 @@ function confirmationState(logPath, opts) {
   const pid = o.pid == null ? null : String(o.pid);
 
   let surfaced = null, tool = null, approved = null, turnEnded = false;
+  // Whether we have already passed one of THIS step's own confirmation lines. Events
+  // arrive in file order for a single writer (the pid filter above holds the stream to
+  // one process), so a cancelled-Stop that appears AFTER our step's line belongs to the
+  // turn our step is part of — no clock comparison needed. This is what catches an
+  // Escape inside the same second as the hook's whole-second stamp: the time rule below
+  // is blind there by construction (TURN_END_MIN_MS exists because same-second lines
+  // can't be ordered against `date +%s`), but file order against our OWN line can. A
+  // stop-lost from the PREVIOUS turn precedes our step's Surfacing in the file, so it
+  // still falls to the time rule and is still rejected.
+  //
+  // Only an event stamped AT/AFTER sinceMs may ARM the rule. The hook stamps the floor
+  // of the second PreToolUse fired in and agy logs the step's lines after that, so our
+  // own lines always qualify — but the SLACK_MS window (which must stay open so the
+  // surfaced/approved FACTS can match) also admits a previous turn's same-numbered
+  // step from up to 2s ago, and letting that arm the rule would count the previous
+  // turn's stop-lost as ours and report "idle" over a genuinely live prompt.
+  let sawStepEvt = false;
+  const armFloor = sinceMs == null ? -Infinity : sinceMs;
   for (const e of events) {
     if (e.tsMs < from) continue;
     if (pid != null && e.pid !== pid) continue;
     if (e.kind === "stop-lost") {
-      if (sinceMs == null || e.tsMs >= sinceMs + TURN_END_MIN_MS) turnEnded = true;
+      if (sawStepEvt || sinceMs == null || e.tsMs >= sinceMs + TURN_END_MIN_MS) turnEnded = true;
       continue;
     }
     if (stepIdx == null || e.step !== stepIdx) continue;
-    if (e.kind === "surfaced") { surfaced = true; if (e.tool) tool = e.tool; }
-    else if (e.kind === "auto-approved") { if (surfaced === null) surfaced = false; if (e.tool) tool = e.tool; }
-    else if (e.kind === "soft-denied") { approved = false; if (e.tool) tool = e.tool; }
-    else if (e.kind === "resolved") { if (!o.cid || !e.cid || e.cid === o.cid) approved = e.approved; }
+    const arms = e.tsMs >= armFloor;
+    if (e.kind === "surfaced") { if (arms) sawStepEvt = true; surfaced = true; if (e.tool) tool = e.tool; }
+    else if (e.kind === "auto-approved") { if (arms) sawStepEvt = true; if (surfaced === null) surfaced = false; if (e.tool) tool = e.tool; }
+    else if (e.kind === "soft-denied") { if (arms) sawStepEvt = true; approved = false; if (e.tool) tool = e.tool; }
+    else if (e.kind === "resolved") { if (!o.cid || !e.cid || e.cid === o.cid) { if (arms) sawStepEvt = true; approved = e.approved; } }
   }
   return { surfaced, tool, approved, turnEnded };
 }

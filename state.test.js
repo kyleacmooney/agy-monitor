@@ -71,6 +71,16 @@ T("FRESH run_command that does NOT force approval → stays busy (running)", () 
   const d = displayLiveState(runCmdLive(500, false), false, NOW);
   assert.strictEqual(d.state, "busy");
 });
+T("stale PreToolUse with NO tool name (and no cli) → idle: nothing to be parked on", () => {
+  // A dangling PreToolUse normally means "parked at the tool" — but with no tool name
+  // there is nothing to wait for or approve, so it degrades to the missed-Stop rule.
+  const noName = { state: "busy", detail: "running a tool", tool: null, event: "PreToolUse", ts: (NOW - BUSY_STALE_MS - 60000) / 1000 };
+  assert.deepStrictEqual(displayLiveState(noName, false, NOW), { state: "idle", stateDetail: "your turn", tool: null });
+  assert.deepStrictEqual(displayLiveState(noName, true, NOW), { state: "idle", stateDetail: "your turn", tool: null });
+  // …while a FRESH nameless PreToolUse is still just busy
+  const fresh = { ...noName, ts: (NOW - 5000) / 1000 };
+  assert.strictEqual(displayLiveState(fresh, false, NOW).state, "busy");
+});
 T("STALE PostToolUse (missed Stop) → idle / your turn", () => {
   const d = displayLiveState(postToolLive(BUSY_STALE_MS + 60000), false, NOW);
   assert.strictEqual(d.state, "idle");

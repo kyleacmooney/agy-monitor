@@ -158,8 +158,52 @@ T("events from BEFORE this PreToolUse don't leak in", () => {
   assert.strictEqual(f.surfaced, null, "an 8-minute-old surfacing is not this step");
   assert.strictEqual(f.turnEnded, false, "a prior turn's lost Stop must not end this one");
 });
-T("a same-second cancelled Stop is NOT trusted (can't be ordered against a whole-second stamp)", () => {
+// SAME-SECOND ESCAPES. The hook stamps whole seconds, so a stop-lost inside the stamp
+// second can never satisfy the TURN_END_MIN_MS time rule — and a user who hits Escape
+// the moment the prompt appears lands exactly there. What CAN be ordered is the log
+// itself: one process appends sequentially, so a stop-lost AFTER our step's own line
+// is ours regardless of clocks, and one BEFORE it belongs to the turn that just ended.
+T("an Escape inside the stamp second IS detected — file order beats the blind time rule", () => {
   write(SURFACE, 'E0721 08:28:58.900000 50198 log_context.go:117] failed to call custom stop hook x: command failed: context canceled, stderr: ');
+  assert.strictEqual(facts().turnEnded, true);
+});
+T("a same-second stop-lost with NO step evidence stays untrusted", () => {
+  // nothing anchors it to our step, and the clock can't order it against `date +%s`
+  write('E0721 08:28:58.900000 50198 log_context.go:117] failed to call custom stop hook x: command failed: context canceled, stderr: ');
+  assert.strictEqual(facts().turnEnded, false);
+});
+T("a same-second stop-lost BEFORE our step's line is the previous turn's, not ours", () => {
+  write(
+    'E0721 08:28:58.050000 50198 log_context.go:117] failed to call custom stop hook x: command failed: context canceled, stderr: ',
+    SURFACE);
+  assert.strictEqual(facts().turnEnded, false);
+});
+T("Escape DURING an auto-approved tool run is detected the same way", () => {
+  write(
+    'I0721 08:28:58.085137 50198 tool_confirmation_manager.go:71] Auto-approving tool confirmation: "Bash" at step 4',
+    'E0721 08:28:58.700000 50198 log_context.go:117] failed to call custom stop hook x: command failed: context canceled, stderr: ');
+  const f = facts();
+  assert.strictEqual(f.surfaced, false);
+  assert.strictEqual(f.turnEnded, true);
+});
+T("a PREVIOUS turn's same-step line inside the slack window cannot arm the rule", () => {
+  // Escape → instant re-send → the new turn reaches the same step number, all within
+  // 2s: the old Surfacing and old stop-lost land inside [sinceMs - SLACK_MS, sinceMs).
+  // If the old line armed the rule, the old stop-lost would read as OURS and a live
+  // prompt would render "idle / your turn". Arming requires tsMs >= sinceMs.
+  write(
+    'I0721 08:28:56.500000 50198 tool_confirmation_manager.go:192] Surfacing tool confirmation: "Bash" at step 4',
+    'E0721 08:28:56.900000 50198 log_context.go:117] failed to call custom stop hook x: command failed: context canceled, stderr: ',
+    SURFACE); // our own step-4 prompt, genuinely up
+  const f = facts();
+  assert.strictEqual(f.surfaced, true, "the prompt IS up");
+  assert.strictEqual(f.turnEnded, false, "the previous turn's lost Stop is not ours");
+});
+T("a SIBLING's step line does not arm the order rule for our stop-lost", () => {
+  // the sibling surfaced its own step 4; its lines are filtered by pid, so a
+  // same-second stop-lost from OUR pid still has no step evidence of ours
+  write(SURFACE.replace(" " + PID + " ", " 99999 "),
+    'E0721 08:28:58.900000 50198 log_context.go:117] failed to call custom stop hook x: command failed: context canceled, stderr: ');
   assert.strictEqual(facts().turnEnded, false);
 });
 T("auto-approved → surfaced:false, so the caller reports 'running', never 'needs you'", () => {
