@@ -55,7 +55,14 @@ function writeConversation(agyHome, { cid = CID, workspace = "/tmp/ws", title = 
     };
     fs.writeFileSync(metaFile, JSON.stringify(meta));
   }
-  fs.writeFileSync(path.join(agyHome, "settings.json"), JSON.stringify({ model: "Gemini 3.1 Pro (High)", permissions: { allow: [] } }));
+  // Seed a valid settings file for worlds that lack one — but never CLOBBER one a
+  // test has already shaped: the safelist suite edits this exact file (it doubles as
+  // AGY_GATE_SETTINGS), and a later writeConversation silently resetting
+  // permissions.allow to [] would erase that state mid-test.
+  const settingsFile = path.join(agyHome, "settings.json");
+  if (!fs.existsSync(settingsFile)) {
+    fs.writeFileSync(settingsFile, JSON.stringify({ model: "Gemini 3.1 Pro (High)", permissions: { allow: [] } }));
+  }
   return cid;
 }
 
@@ -160,6 +167,45 @@ function writeClaudeSession(base, {
   return { root, file, dir, sid };
 }
 
+// ---- a LIVE fake agy process --------------------------------------------------
+// listAgySessions discovers sessions with ps (argv[0] basename === "agy") and lsof
+// (cwd → workspace, an open brain/<cid>/ file → conversation, an open
+// antigravity-cli/log/cli-*.log → agy's own stdout log). This spawns a process that
+// satisfies all four checks for real: bash cd's into the workspace, holds the brain
+// transcript open on fd 3, points stdout at a cli log, then execs into `sleep` with
+// argv[0] forced to "agy". No monitor code is stubbed — the test exercises the same
+// ps/lsof path production runs.
+//
+// NB: callers must UNSET AGY_MONITOR_NO_PS (makeRoots sets it), which also lets any
+// REAL agy session on the machine into the results — assertions must select by cid.
+function spawnFakeAgy({ agyHome, workspace, cid }) {
+  const { spawn } = require("child_process");
+  const logDir = path.join(agyHome, "log");
+  fs.mkdirSync(logDir, { recursive: true });
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  // the filename carries the log's start time — logStartMs parses it for the year
+  const logPath = path.join(logDir,
+    `cli-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}.log`);
+  fs.writeFileSync(logPath, "");
+  const transcript = path.join(agyHome, "brain", cid, ".system_generated", "logs", "transcript_full.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  if (!fs.existsSync(transcript)) fs.writeFileSync(transcript, "");
+  const child = spawn("/bin/bash", ["-c",
+    'cd "$1" && exec 3< "$2" && exec >> "$3" 2>&1 && exec -a agy sleep 120',
+    "bash", workspace, transcript, logPath], { stdio: "ignore" });
+  return { pid: child.pid, logPath, transcript, kill: () => { try { child.kill("SIGKILL"); } catch {} } };
+}
+
+// One glog-format line as agy's own process writes them (year omitted — it comes
+// from the log filename; the pid column is the writing process's).
+function agyGlogLine(pid, atMs, body) {
+  const d = new Date(atMs);
+  const p2 = (n) => String(n).padStart(2, "0");
+  const us = String(d.getMilliseconds() * 1000).padStart(6, "0");
+  return `I${p2(d.getMonth() + 1)}${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${us} ${pid} tool_confirmation_manager.go:192] ${body}`;
+}
+
 // A minimal stdio MCP server (newline JSON-RPC): answers initialize + tools/list.
 function writeMcpStub(dir) {
   const stub = path.join(dir, "mcp-stub.js");
@@ -195,4 +241,4 @@ function finish(failures, name) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-module.exports = { CID, makeRoots, writeConversation, writeHistoryLine, writeAgyStub, writeCodexSession, writeClaudeSession, writeMcpStub, assert, finish, sleep };
+module.exports = { CID, makeRoots, writeConversation, writeHistoryLine, writeAgyStub, writeCodexSession, writeClaudeSession, writeMcpStub, spawnFakeAgy, agyGlogLine, assert, finish, sleep };

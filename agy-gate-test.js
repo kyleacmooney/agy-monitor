@@ -350,6 +350,28 @@ async function main() {
       assert.deepStrictEqual(JSON.parse(runHook(ev, { HOME: d }, denyPayload, d)), {}, ev);
     }
   });
+  // The hook's actual JOB is the status file — the stdout reply is just etiquette.
+  // The {} change above touched the reply path right next to the write, so pin that
+  // every event still records itself, verbatim payload included.
+  await test("EVERY event writes the session status file (the hook's real job)", () => {
+    const d = mkHookDir(null);
+    const payload = JSON.stringify({ stepIdx: 7, toolCall: { name: "run_command" } });
+    for (const ev of ["PreToolUse", "PostToolUse", "PreInvocation", "PostInvocation", "Stop", "Notification"]) {
+      const cid = "11111111-2222-3333-4444-55555555" + String(ev.length).padStart(4, "0");
+      runHook(ev, { HOME: d, ANTIGRAVITY_CONVERSATION_ID: cid }, payload, d);
+      const rec = JSON.parse(fs.readFileSync(path.join(d, ".agy-monitor", "sessions", cid + ".json"), "utf8"));
+      assert.strictEqual(rec.event, ev);
+      assert.strictEqual(rec.conversationId, cid);
+      assert.ok(rec.ts > 0 && Math.abs(rec.ts * 1000 - Date.now()) < 60000, "stamped now, in seconds");
+      assert.deepStrictEqual(rec.payload, JSON.parse(payload), "raw stdin payload embedded verbatim");
+    }
+  });
+  await test("an empty stdin payload records null, not a torn file", () => {
+    const d = mkHookDir(null);
+    runHook("Stop", { HOME: d, ANTIGRAVITY_CONVERSATION_ID: "22222222-2222-3333-4444-555555550000" }, "", d);
+    const rec = JSON.parse(fs.readFileSync(path.join(d, ".agy-monitor", "sessions", "22222222-2222-3333-4444-555555550000.json"), "utf8"));
+    assert.strictEqual(rec.payload, null);
+  });
   await test("GATED PreToolUse passes the gate's decision through unchanged", () => {
     const d = mkHookDir(`console.log(JSON.stringify({ decision: "deny", reason: "stub gate" }));`);
     assert.deepStrictEqual(JSON.parse(runHook("PreToolUse", { HOME: d, AGY_MONITOR_GATED: "1" }, denyPayload, d)),
