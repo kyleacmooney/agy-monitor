@@ -310,6 +310,35 @@ function main() {
     assert.strictEqual(P.listRules().logSpansWindow, true);
   });
 
+  test("one row with a mangled ts does not pin logSpansWindow false", () => {
+    const root = freshRoot(); settingsWith(["command(git diff)"]);
+    writeDecisions(root, [
+      fired({ atoms: ["git diff"] }),
+      row({ atoms: ["y"], ts: ago(29.5 * 24 * 60 * 60 * 1000) }), // genuinely old — proves reach
+    ]);
+    // readDecisions KEEPS a row whose ts doesn't parse (NaN skips the window filter)
+    // and sorts it to the very end — the exact slot the old code read on faith, so a
+    // single torn row froze `spans` at false for as long as it stayed in the month file
+    const monthFile = path.join(root, "decisions", new Date().toISOString().slice(0, 7) + ".jsonl");
+    fs.appendFileSync(monthFile, JSON.stringify(row({ atoms: ["bad"], ts: "not-a-date" })) + "\n");
+    assert.strictEqual(P.listRules().logSpansWindow, true,
+      "the oldest PARSEABLE row decides; a mangled ts is skipped, not fatal");
+  });
+
+  test("a 1-day window still demands real reach before branding rules dead", () => {
+    process.env.AGY_PROMOTER_WINDOW_DAYS = "1";
+    try {
+      const root = freshRoot(); settingsWith(["command(git diff)"]);
+      // (days-1)*DAY_MS degenerates to 0 at days=1 — a 2-hour-old log must NOT span
+      writeDecisions(root, [fired({ atoms: ["git diff"], ts: ago(2 * 60 * 60 * 1000) })]);
+      assert.strictEqual(P.listRules().logSpansWindow, false, "a 2h-old log does not span a 1-day window");
+      writeDecisions(root, [row({ atoms: ["old"], ts: ago(14 * 60 * 60 * 1000) })]);
+      assert.strictEqual(P.listRules().logSpansWindow, true, "14h (> half the window) does");
+    } finally {
+      process.env.AGY_PROMOTER_WINDOW_DAYS = "30";
+    }
+  });
+
   test("usesKnown is false when the log holds no safelist-allow rows at all", () => {
     const root = freshRoot(); settingsWith(["command(git diff)"]);
     writeDecisions(root, [row({ atoms: ["git diff"] })]); // classifier-auto-allow only
@@ -442,6 +471,45 @@ function main() {
     const after = fs.readFileSync(file, "utf8");
     assert.ok(/BROKEN/.test(after), "the user's file is left exactly as it was");
     assert.ok(/command\(rm\)/.test(after), "permissions.deny survives");
+  });
+
+  // The ledger is what lets restore skip the promotion veto, so an entry must be
+  // scoped to the file the rule actually came out of — otherwise demoting from a
+  // scratch settings file licenses an unvetted append into the real one once
+  // AGY_GATE_SETTINGS is repointed.
+  test("a demotion recorded against one settings file cannot restore into another", () => {
+    freshRoot();
+    settingsWith(["command(sudo systemctl)"]);            // file A
+    P.demoteRule("command(sudo systemctl)");              // ledger entry names file A
+    const fileB = settingsWith(["command(git log)"]);     // repoint at file B
+    const res = P.restoreRule("command(sudo systemctl)");
+    assert.ok(!res.ok, "the ledger entry is for a different file");
+    assert.ok(/not removed from this dashboard/.test(res.message || ""), res.message);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(fileB, "utf8")).permissions.allow,
+      ["command(git log)"], "file B untouched");
+  });
+
+  test("…and the undo still works once pointed back at the original file", () => {
+    freshRoot();
+    const fileA = settingsWith(["command(wc)"]);
+    P.demoteRule("command(wc)");
+    settingsWith(["command(git log)"]);                   // away…
+    process.env.AGY_GATE_SETTINGS = fileA;                // …and back
+    assert.ok(P.restoreRule("command(wc)").ok);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(fileA, "utf8")).permissions.allow, ["command(wc)"]);
+  });
+
+  test("consuming an undo only spends THIS file's ledger entry", () => {
+    freshRoot();
+    const fileA = settingsWith(["command(head)"]);
+    P.demoteRule("command(head)");
+    const fileB = settingsWith(["command(head)"]);        // same rule, different file
+    P.demoteRule("command(head)");
+    assert.ok(P.restoreRule("command(head)").ok, "restores into file B");
+    process.env.AGY_GATE_SETTINGS = fileA;
+    assert.ok(P.restoreRule("command(head)").ok, "file A's own entry is still unspent");
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(fileA, "utf8")).permissions.allow, ["command(head)"]);
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(fileB, "utf8")).permissions.allow, ["command(head)"]);
   });
 
   test("promote still creates settings.json when it is genuinely absent", () => {

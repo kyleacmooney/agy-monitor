@@ -297,9 +297,17 @@ function listRules() {
   // same bound listDecisions applies — the decision log is append-only and unpruned,
   // so an uncapped scan here is rows x rules work on the server's event loop
   const fired = rows.filter((r) => r && r.outcome === "safelist-allow").slice(0, MAX_DECISIONS);
-  // readDecisions is newest-first, so the last row is the oldest we hold
-  const oldest = rows.length ? Date.parse(rows[rows.length - 1].ts) : NaN;
-  const spans = !Number.isNaN(oldest) && (Date.now() - oldest) >= (days - 1) * DAY_MS;
+  // readDecisions is newest-first, so the oldest row we hold is at the end — but one
+  // row with a mangled/missing ts must not pin `spans` false forever, so walk back
+  // from the end to the oldest row whose ts actually parses.
+  let oldest = NaN;
+  for (let i = rows.length - 1; i >= 0 && Number.isNaN(oldest); i--) {
+    oldest = Date.parse(rows[i] && rows[i].ts);
+  }
+  // `days - 1` leaves a day of slack for a log that started mid-day — but at days=1
+  // that degenerates to 0 and an arbitrarily young log would claim to span the
+  // window, branding every rule dead. Half the window is the floor.
+  const spans = !Number.isNaN(oldest) && (Date.now() - oldest) >= Math.max(days - 1, days / 2) * DAY_MS;
   return {
     ok: true,
     path: settingsPath(),
@@ -337,7 +345,12 @@ function demoteRule(rule) {
   }
   const state = readState();
   if (!Array.isArray(state.demotions)) state.demotions = [];
-  state.demotions.push({ rule: r, backup: backup || null, ts: new Date().toISOString() });
+  // `file` identifies WHICH settings.json the rule came out of. restoreRule skips the
+  // promotion veto on the strength of this ledger, so an entry must only ever
+  // authorize putting the string back into the same file it was removed from —
+  // otherwise a demotion recorded against a scratch settings file would license an
+  // unvetted append into the real one after AGY_GATE_SETTINGS is repointed.
+  state.demotions.push({ rule: r, file, backup: backup || null, ts: new Date().toISOString() });
   writeState(state);
   return { ok: true, rule: r, backup: backup || null };
 }
@@ -353,12 +366,14 @@ function demoteRule(rule) {
 function restoreRule(rule) {
   const r = String(rule == null ? "" : rule).trim();
   if (!r) return { ok: false, message: "empty rule" };
-  // Only undo what we recorded removing. Skipping the veto is only defensible for a
-  // string this tool took OUT of the file; without this check the action would be an
-  // unvetted "append anything to permissions.allow" primitive, and restoring would be
-  // the way around a veto that refuses command(*) and bare single binaries outright.
+  // Only undo what we recorded removing — FROM THIS FILE. Skipping the veto is only
+  // defensible for a string this tool took OUT of the file it is about to write back
+  // into; a ledger entry recorded against some other settings.json (AGY_GATE_SETTINGS
+  // repointed since) would otherwise be an unvetted "append anything to
+  // permissions.allow" primitive aimed at a file that never held the rule.
+  const file = settingsPath();
   const state = readState();
-  if (!(Array.isArray(state.demotions) && state.demotions.some((d) => d && d.rule === r))) {
+  if (!(Array.isArray(state.demotions) && state.demotions.some((d) => d && d.rule === r && d.file === file))) {
     return { ok: false, message: "nothing to restore — that rule was not removed from this dashboard", rule: r };
   }
   // Belt-and-braces: command(*) disables the gate for every command. Helping a user put
@@ -367,7 +382,6 @@ function restoreRule(rule) {
   if (pat && pat[1].trim() === "*") {
     return { ok: false, message: "refusing to restore command(*) — it would auto-approve every command", rule: r };
   }
-  const file = settingsPath();
   let settings = readJsonSafe(file);
   // readJsonSafe returns null for BOTH "missing" and "unparseable". Rebuilding a fresh
   // object is right for the first and catastrophic for the second: it would drop every
@@ -393,8 +407,9 @@ function restoreRule(rule) {
     return { ok: false, message: "failed to write settings: " + (e && e.message ? e.message : String(e)), rule: r };
   }
   // Consume the ledger entry: one removal buys exactly one undo, so a single old
-  // demotion can't be replayed into repeated grants later.
-  state.demotions = state.demotions.filter((d) => !(d && d.rule === r));
+  // demotion can't be replayed into repeated grants later. Only THIS file's entries
+  // are spent — a same-named removal from a different settings file keeps its undo.
+  state.demotions = state.demotions.filter((d) => !(d && d.rule === r && d.file === file));
   if (!Array.isArray(state.restorations)) state.restorations = [];
   state.restorations.push({ rule: r, backup: backup || null, ts: new Date().toISOString() });
   writeState(state);
